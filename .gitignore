@@ -1,0 +1,40 @@
+.DS_Store
+
+# .NET
+bin/
+obj/
+*.user
+
+# Node
+node_modules/
+dist/
+.vite/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# 本機環境
+.env
+.env.*
+!.env.example
+
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# 內部開發紀錄／文件（公開範本不納入）
+PROGRESS_REPORT_*.md
+plans/
+report/
+reports/
+todo/
+docs/
+
+# 本機／匯出的人工測試文件
+scripts/
+
+# Vite / TypeScript generated config artifacts
+web/vite.config.cjs
+web/vite.config.ts.js
+web/vite.config.ts.timestamp-*.js

@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      DocumentStorage__Root: /data/uploads
+      Jwt__SigningKey: demo-only-carinsurance-signing-key-change-before-production-2026
+      Auth__MfaCode: "123456"
+      Auth__DemoPassword: Demo123!
+    volumes:
+      - carinsurance-data:/data
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "8081:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  carinsurance-data:

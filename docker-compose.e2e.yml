@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Data Source=/data/carinsurance-e2e.db
+      DocumentStorage__Root: /data/uploads
+      PolicyIssuance__StorageRoot: /data/policies
+      Jwt__SigningKey: e2e-only-carinsurance-signing-key-2026-at-least-32-bytes
+      Auth__MfaCode: "123456"
+      Auth__DemoPassword: Demo123!
+      RenewalReminder__Enabled: "false"
+    volumes:
+      - carinsurance-e2e-data:/data
+    expose:
+      - "8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    entrypoint: []
+    ports:
+      - "127.0.0.1:18081:80"
+    depends_on:
+      - api
+
+volumes:
+  carinsurance-e2e-data:
