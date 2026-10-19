@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { getCurrentUser } from '../api/auth'
 import type { AuthenticatedUser } from '../api/auth'
 import { ApiError } from '../api/http'
@@ -28,16 +29,22 @@ function getInitializationMessage(error: unknown): string {
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
+  const queryClient = useQueryClient()
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [user, setUser] = useState<AuthenticatedUser | null>(null)
   const [initializationError, setInitializationError] = useState<string | null>(null)
   const [initializationAttempt, setInitializationAttempt] = useState(0)
 
+  const clearPrivateQueries = useCallback(() => {
+    void queryClient.cancelQueries().finally(() => queryClient.clear())
+  }, [queryClient])
+
   useEffect(() => subscribeToAccessTokenCleared(() => {
+    clearPrivateQueries()
     setUser(null)
     setInitializationError(null)
     setStatus('unauthenticated')
-  }), [])
+  }), [clearPrivateQueries])
 
   useEffect(() => {
     let active = true
@@ -80,11 +87,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, [initializationAttempt])
 
   const completeLogin = useCallback((accessToken: string, currentUser: AuthenticatedUser) => {
+    queryClient.clear()
     setAccessToken(accessToken)
     setUser(currentUser)
     setInitializationError(null)
     setStatus('authenticated')
-  }, [])
+  }, [queryClient])
 
   const logout = useCallback(() => {
     clearAccessToken()

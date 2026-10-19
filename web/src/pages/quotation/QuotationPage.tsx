@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -45,6 +46,7 @@ import type {
 } from '../../api/quotes'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 import {
   channelOptions,
   deductibleOptions,
@@ -113,20 +115,11 @@ function parseThirdParty(value: string): [number | null, number | null] {
 function QuotationPage() {
   const { message } = App.useApp()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [form] = Form.useForm<QuotationFormValues>()
-  const vehicleRequest = useRef<AbortController | null>(null)
-  const [customers, setCustomers] = useState<Customer[]>([])
-  const [vehicles, setVehicles] = useState<Vehicle[]>([])
-  const [rateVersions, setRateVersions] = useState<RateVersion[]>([])
-  const [loadingInitial, setLoadingInitial] = useState(true)
-  const [loadingVehicles, setLoadingVehicles] = useState(false)
-  const [loadError, setLoadError] = useState<Error | null>(null)
-  const [calculating, setCalculating] = useState(false)
   const [calculationError, setCalculationError] = useState<string | null>(null)
   const [premium, setPremium] = useState<PremiumCalculationResponse | null>(null)
   const [lastCalculation, setLastCalculation] = useState<PremiumCalculationRequest | null>(null)
-  const [savingQuote, setSavingQuote] = useState(false)
-  const [activatingQuote, setActivatingQuote] = useState(false)
   const [quoteError, setQuoteError] = useState<string | null>(null)
   const [createdQuote, setCreatedQuote] = useState<Quote | null>(null)
   const calculationRevision = useRef(0)
@@ -134,6 +127,25 @@ function QuotationPage() {
   const customerId = Form.useWatch('customerId', form)
   const vehicleId = Form.useWatch('vehicleId', form)
   const ownDamageType = Form.useWatch('ownDamageType', form)
+  const customersQuery = useQuery({
+    queryKey: queryKeys.customers.list('', 1, 100),
+    queryFn: ({ signal }) => getCustomers('', 1, 100, signal),
+  })
+  const rateVersionsQuery = useQuery({
+    queryKey: queryKeys.rateVersions.all,
+    queryFn: ({ signal }) => getRateVersions(signal),
+  })
+  const vehiclesQuery = useQuery({
+    queryKey: queryKeys.vehicles.byCustomer(customerId ?? 0),
+    queryFn: ({ signal }) => getVehiclesByCustomer(customerId!, signal),
+    enabled: Boolean(customerId),
+  })
+  const customers: Customer[] = customersQuery.data?.items ?? []
+  const vehicles: Vehicle[] = vehiclesQuery.data ?? []
+  const rateVersions: RateVersion[] = rateVersionsQuery.data ?? []
+  const loadError = customersQuery.error ?? rateVersionsQuery.error
+  const loadingInitial = customersQuery.isPending || rateVersionsQuery.isPending
+  const loadingVehicles = vehiclesQuery.isFetching
   const selectedCustomer = useMemo(
     () => customers.find((customer) => customer.id === customerId),
     [customers, customerId],
@@ -149,33 +161,6 @@ function QuotationPage() {
 
   const taipeiToday = useMemo(getTaipeiToday, [])
 
-  const loadInitial = useCallback(async (signal?: AbortSignal) => {
-    setLoadingInitial(true)
-    setLoadError(null)
-    try {
-      const [customerResult, rateVersionResult] = await Promise.all([
-        getCustomers('', 1, 100, signal),
-        getRateVersions(signal),
-      ])
-      setCustomers(customerResult.items)
-      setRateVersions(rateVersionResult)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setLoadError(error instanceof Error ? error : new Error('初始化報價資料失敗。'))
-      }
-    } finally {
-      if (!signal?.aborted) setLoadingInitial(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadInitial(controller.signal)
-    return () => controller.abort()
-  }, [loadInitial])
-
-  useEffect(() => () => vehicleRequest.current?.abort(), [])
-
   const invalidateCalculation = () => {
     calculationRevision.current += 1
     setPremium(null)
@@ -185,31 +170,33 @@ function QuotationPage() {
     setCreatedQuote(null)
   }
 
-  const handleCustomerChange = async (nextCustomerId: number) => {
+  const handleCustomerChange = (nextCustomerId: number) => {
     invalidateCalculation()
     form.setFieldsValue({ vehicleId: undefined })
-    setVehicles([])
 
     const customer = customers.find((item) => item.id === nextCustomerId)
     if (customer?.birthDate) {
       form.setFieldsValue({ driverBirthDate: toDateOnly(customer.birthDate) })
     }
-
-    vehicleRequest.current?.abort()
-    const controller = new AbortController()
-    vehicleRequest.current = controller
-    setLoadingVehicles(true)
-
-    try {
-      setVehicles(await getVehiclesByCustomer(nextCustomerId, controller.signal))
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        message.error(error instanceof Error ? error.message : '載入客戶車輛失敗。')
-      }
-    } finally {
-      if (vehicleRequest.current === controller) setLoadingVehicles(false)
-    }
   }
+
+  const calculateMutation = useMutation({
+    mutationFn: (request: PremiumCalculationRequest) => calculatePremium(request),
+  })
+  const createQuoteMutation = useMutation({
+    mutationFn: createQuote,
+    onSuccess: (quote) => {
+      setCreatedQuote(quote)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.quotes.all })
+    },
+  })
+  const activateQuoteMutation = useMutation({
+    mutationFn: ({ id, request }: { id: number; request: Parameters<typeof updateQuote>[1] }) => updateQuote(id, request),
+    onSuccess: (quote) => {
+      setCreatedQuote(quote)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.quotes.all })
+    },
+  })
 
   const buildCalculation = (values: QuotationFormValues): PremiumCalculationRequest => {
     if (!selectedRateVersion) throw new Error('目前沒有可使用的費率版本。')
@@ -257,8 +244,7 @@ function QuotationPage() {
       const values = await form.validateFields()
       const request = buildCalculation(values)
       const revision = calculationRevision.current
-      setCalculating(true)
-      const response = await calculatePremium(request)
+      const response = await calculateMutation.mutateAsync(request)
       if (revision !== calculationRevision.current) return
       setPremium(response)
       setLastCalculation(request)
@@ -268,8 +254,6 @@ function QuotationPage() {
       setPremium(null)
       setLastCalculation(null)
       setCalculationError(error instanceof Error ? error.message : '保費試算失敗。')
-    } finally {
-      setCalculating(false)
     }
   }
 
@@ -283,8 +267,7 @@ function QuotationPage() {
         throw new Error('客戶、車輛與保險起日皆為必填。')
       }
 
-      setSavingQuote(true)
-      const quote = await createQuote({
+      const quote = await createQuoteMutation.mutateAsync({
         customerId: values.customerId,
         vehicleId: values.vehicleId,
         insuranceStartDate: values.insuranceStartDate,
@@ -298,18 +281,15 @@ function QuotationPage() {
     } catch (error) {
       if (error && typeof error === 'object' && 'errorFields' in error) return
       setQuoteError(error instanceof Error ? error.message : '建立報價失敗。')
-    } finally {
-      setSavingQuote(false)
     }
   }
 
   const handleActivateQuote = async () => {
     if (!createdQuote) return
     setQuoteError(null)
-    setActivatingQuote(true)
 
     try {
-      const quote = await updateQuote(createdQuote.id, {
+      const quote = await activateQuoteMutation.mutateAsync({ id: createdQuote.id, request: {
         customerId: createdQuote.customerId,
         vehicleId: createdQuote.vehicleId,
         insuranceStartDate: createdQuote.insuranceStartDate.slice(0, 10),
@@ -317,14 +297,12 @@ function QuotationPage() {
         channel: createdQuote.channel,
         status: 'active',
         calculation: createdQuote.calculation,
-      })
+      } })
       setCreatedQuote(quote)
       message.success(`報價 ${quote.quoteNumber} 已啟用，可進行投保`)
       navigate('/underwriting')
     } catch (error) {
       setQuoteError(error instanceof Error ? error.message : '啟用報價失敗。')
-    } finally {
-      setActivatingQuote(false)
     }
   }
 
@@ -380,7 +358,10 @@ function QuotationPage() {
   }
 
   if (loadError) {
-    return <ErrorState title="報價資料載入失敗" message={loadError.message} onRetry={() => void loadInitial()} />
+    return <ErrorState title="報價資料載入失敗" message={loadError.message} onRetry={() => {
+      void customersQuery.refetch()
+      void rateVersionsQuery.refetch()
+    }} />
   }
 
   if (customers.length === 0) {
@@ -460,6 +441,16 @@ function QuotationPage() {
               </Form.Item>
             </Col>
           </Row>
+
+          {vehiclesQuery.error ? (
+            <Alert
+              type="error"
+              showIcon
+              message="客戶車輛載入失敗"
+              description={vehiclesQuery.error.message}
+              action={<Button size="small" onClick={() => void vehiclesQuery.refetch()}>重試</Button>}
+            />
+          ) : null}
 
           {selectedCustomer || selectedVehicle ? (
             <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} bordered>
@@ -581,7 +572,7 @@ function QuotationPage() {
             type="primary"
             size="large"
             icon={<CalculatorOutlined />}
-            loading={calculating}
+            loading={calculateMutation.isPending}
             disabled={!selectedRateVersion}
             onClick={handleCalculate}
           >
@@ -628,7 +619,7 @@ function QuotationPage() {
           />
 
           <div className="quotation-save-row">
-            <Button type="primary" size="large" icon={<FileAddOutlined />} loading={savingQuote} onClick={handleCreateQuote}>
+            <Button type="primary" size="large" icon={<FileAddOutlined />} loading={createQuoteMutation.isPending} onClick={handleCreateQuote}>
               建立報價草稿
             </Button>
             <Typography.Text type="secondary">報價建立後有效期固定 30 天。</Typography.Text>
@@ -652,7 +643,7 @@ function QuotationPage() {
               <Space wrap>
                 <Tag color="blue">草稿</Tag>
                 <Typography.Text strong>{currencyFormatter.format(createdQuote.totalPremium)}</Typography.Text>
-                <Button type="primary" loading={activatingQuote} onClick={() => void handleActivateQuote()}>
+                <Button type="primary" loading={activateQuoteMutation.isPending} onClick={() => void handleActivateQuote()}>
                   啟用並前往投保
                 </Button>
               </Space>

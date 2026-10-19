@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -57,6 +58,7 @@ import type { SignaturePadHandle } from '../../components/SignaturePad'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { getQuotes } from '../../api/quotes'
 import type { Quote } from '../../api/quotes'
+import { queryKeys } from '../../query/queryKeys'
 
 type BeneficiaryFormItem = {
   name: string
@@ -138,20 +140,16 @@ function getResumeStep(item: InsuranceApplication): number {
 
 function UnderwritingPage() {
   const { message } = App.useApp()
+  const queryClient = useQueryClient()
   const [applicantForm] = Form.useForm<ApplicantStepRequest>()
   const [insuredForm] = Form.useForm<InsuredStepRequest>()
   const [beneficiaryForm] = Form.useForm<BeneficiaryFormValues>()
   const [documentForm] = Form.useForm<DocumentFormValues>()
   const signaturePadRef = useRef<SignaturePadHandle | null>(null)
 
-  const [quotes, setQuotes] = useState<Quote[]>([])
-  const [applications, setApplications] = useState<InsuranceApplication[]>([])
-  const [application, setApplication] = useState<InsuranceApplication | null>(null)
+  const [selectedApplicationId, setSelectedApplicationId] = useState<number | null>(null)
   const [currentStep, setCurrentStep] = useState(0)
   const [selectedQuoteId, setSelectedQuoteId] = useState<number | undefined>()
-  const [loadingInitial, setLoadingInitial] = useState(true)
-  const [loadError, setLoadError] = useState<Error | null>(null)
-  const [loadingApplication, setLoadingApplication] = useState(false)
   const [creatingApplication, setCreatingApplication] = useState(false)
   const [savingStep, setSavingStep] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -160,6 +158,26 @@ function UnderwritingPage() {
   const [returnReason, setReturnReason] = useState('')
   const [selectedSignerRole, setSelectedSignerRole] = useState<ApplicationSignerRole>('applicant')
   const [actionError, setActionError] = useState<string | null>(null)
+
+  const quotesQuery = useQuery({
+    queryKey: queryKeys.quotes.all,
+    queryFn: ({ signal }) => getQuotes(signal),
+  })
+  const applicationsQuery = useQuery({
+    queryKey: queryKeys.applications.all,
+    queryFn: ({ signal }) => getApplications(signal),
+  })
+  const applicationQuery = useQuery({
+    queryKey: queryKeys.applications.detail(selectedApplicationId ?? 0),
+    queryFn: ({ signal }) => getApplication(selectedApplicationId!, signal),
+    enabled: selectedApplicationId !== null,
+  })
+  const quotes: Quote[] = quotesQuery.data ?? []
+  const applications: InsuranceApplication[] = applicationsQuery.data ?? []
+  const application: InsuranceApplication | null = applicationQuery.data ?? null
+  const loadingInitial = quotesQuery.isPending || applicationsQuery.isPending
+  const loadError = quotesQuery.error ?? applicationsQuery.error
+  const loadingApplication = applicationQuery.isFetching
 
   const designation = Form.useWatch('designation', beneficiaryForm)
   const beneficiaryItems = Form.useWatch('beneficiaries', beneficiaryForm) ?? []
@@ -218,31 +236,6 @@ function UnderwritingPage() {
     })
   }, [application, applicantForm, beneficiaryForm, currentStep, documentForm, insuredForm])
 
-  const loadOverview = useCallback(async (signal?: AbortSignal) => {
-    setLoadingInitial(true)
-    setLoadError(null)
-    try {
-      const [quoteItems, applicationItems] = await Promise.all([
-        getQuotes(signal),
-        getApplications(signal),
-      ])
-      setQuotes(quoteItems)
-      setApplications(applicationItems)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setLoadError(error instanceof Error ? error : new Error('載入投保資料失敗。'))
-      }
-    } finally {
-      if (!signal?.aborted) setLoadingInitial(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadOverview(controller.signal)
-    return () => controller.abort()
-  }, [loadOverview])
-
   const usedQuoteIds = useMemo(
     () => new Set(applications.map((item) => item.quoteId)),
     [applications],
@@ -260,16 +253,16 @@ function UnderwritingPage() {
   )
 
   const handleSelectApplication = async (id: number) => {
-    setLoadingApplication(true)
     setActionError(null)
     try {
-      const item = await getApplication(id)
-      setApplication(item)
+      const item = await queryClient.fetchQuery({
+        queryKey: queryKeys.applications.detail(id),
+        queryFn: ({ signal }) => getApplication(id, signal),
+      })
+      setSelectedApplicationId(id)
       setCurrentStep(getResumeStep(item))
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '載入投保申請失敗。')
-    } finally {
-      setLoadingApplication(false)
     }
   }
 
@@ -283,14 +276,15 @@ function UnderwritingPage() {
     setActionError(null)
     try {
       const created = await createApplication({ quoteId: selectedQuoteId })
-      setApplications((previous) => [...previous, created])
-      setApplication(created)
+      queryClient.setQueryData<InsuranceApplication[]>(queryKeys.applications.all, (previous = []) => [...previous, created])
+      queryClient.setQueryData(queryKeys.applications.detail(created.id), created)
+      setSelectedApplicationId(created.id)
       setCurrentStep(0)
       setSelectedQuoteId(undefined)
       message.success(`投保申請 ${created.applicationNumber} 已建立`)
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '建立投保申請失敗。')
-      await loadOverview()
+      await Promise.all([quotesQuery.refetch(), applicationsQuery.refetch()])
     } finally {
       setCreatingApplication(false)
     }
@@ -303,8 +297,7 @@ function UnderwritingPage() {
     setActionError(null)
     try {
       const updated = await updateApplicant(application.id, values)
-      setApplication(updated)
-      setApplications((items) => items.map((item) => item.id === updated.id ? updated : item))
+      syncApplication(updated)
       message.success('要保資料已儲存')
       setCurrentStep(1)
     } catch (error) {
@@ -324,8 +317,7 @@ function UnderwritingPage() {
         ...values,
         email: values.email?.trim() || null,
       })
-      setApplication(updated)
-      setApplications((items) => items.map((item) => item.id === updated.id ? updated : item))
+      syncApplication(updated)
       message.success('被保險人資料已儲存')
       setCurrentStep(2)
     } catch (error) {
@@ -358,8 +350,7 @@ function UnderwritingPage() {
     setActionError(null)
     try {
       const updated = await updateBeneficiaries(application.id, request)
-      setApplication(updated)
-      setApplications((items) => items.map((item) => item.id === updated.id ? updated : item))
+      syncApplication(updated)
       message.success('受益人資料已儲存')
       setCurrentStep(3)
     } catch (error) {
@@ -370,8 +361,10 @@ function UnderwritingPage() {
   }
 
   const syncApplication = (updated: InsuranceApplication) => {
-    setApplication(updated)
-    setApplications((items) => items.map((item) => item.id === updated.id ? updated : item))
+    queryClient.setQueryData(queryKeys.applications.detail(updated.id), updated)
+    queryClient.setQueryData<InsuranceApplication[]>(queryKeys.applications.all, (items = []) => (
+      items.map((item) => item.id === updated.id ? updated : item)
+    ))
   }
 
   const handleSign = async () => {
@@ -489,8 +482,7 @@ function UnderwritingPage() {
     setActionError(null)
     try {
       const updated = await updateDocumentConfirmation(application.id, values)
-      setApplication(updated)
-      setApplications((items) => items.map((item) => item.id === updated.id ? updated : item))
+      syncApplication(updated)
       message.success('文件確認狀態已儲存')
       return updated
     } catch (error) {
@@ -510,8 +502,7 @@ function UnderwritingPage() {
     setActionError(null)
     try {
       const submitted = await submitApplication(application.id)
-      setApplication(submitted)
-      setApplications((items) => items.map((item) => item.id === submitted.id ? submitted : item))
+      syncApplication(submitted)
       message.success(`投保申請 ${submitted.applicationNumber} 已送出`)
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '送出投保申請失敗。')
@@ -1004,7 +995,10 @@ function UnderwritingPage() {
   }
 
   if (loadError) {
-    return <ErrorState title="載入投保資料失敗" message={loadError.message} onRetry={() => void loadOverview()} />
+    return <ErrorState title="載入投保資料失敗" message={loadError.message} onRetry={() => {
+      void quotesQuery.refetch()
+      void applicationsQuery.refetch()
+    }} />
   }
 
   return (

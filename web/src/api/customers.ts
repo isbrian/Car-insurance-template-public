@@ -1,4 +1,4 @@
-import { authenticatedFetch } from './http'
+import { authenticatedFetch, toApiError } from './http'
 
 export type Customer = {
   id: number
@@ -42,22 +42,8 @@ export type CustomerCreateRequest = {
   address?: string
 }
 
-export type ProblemDetails = {
-  title?: string
-  detail?: string
-  errors?: Record<string, string[]>
-}
-
 async function readError(response: Response): Promise<Error> {
-  let problem: ProblemDetails | undefined
-  try {
-    problem = (await response.json()) as ProblemDetails
-  } catch {
-    // 非 JSON 回應使用 HTTP 狀態文字。
-  }
-
-  const message = problem?.detail || problem?.title || `請求失敗（${response.status}）`
-  return new Error(message)
+  return toApiError(response)
 }
 
 export async function getCustomers(

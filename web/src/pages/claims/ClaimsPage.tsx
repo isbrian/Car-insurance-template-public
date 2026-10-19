@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -37,6 +38,7 @@ import type { Claim, ClaimStatus } from '../../api/claims'
 import { ApiError } from '../../api/http'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 
 const pageSize = 10
 
@@ -106,77 +108,46 @@ function renderStatus(status: ClaimStatus) {
 
 function ClaimsPage() {
   const { message } = App.useApp()
-  const [claims, setClaims] = useState<Claim[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<Error | null>(null)
+  const queryClient = useQueryClient()
   const [status, setStatus] = useState('')
   const [keyword, setKeyword] = useState('')
   const [page, setPage] = useState(1)
-  const [reloadKey, setReloadKey] = useState(0)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [detail, setDetail] = useState<Claim | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<Error | null>(null)
   const [transitionKind, setTransitionKind] = useState<TransitionKind | null>(null)
-  const [transitioning, setTransitioning] = useState(false)
   const [transitionForm] = Form.useForm<TransitionFormValues>()
   const [settlementKind, setSettlementKind] = useState<SettlementKind | null>(null)
-  const [settling, setSettling] = useState(false)
   const [settlementForm] = Form.useForm<SettlementFormValues>()
-
-  const loadClaims = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true)
-    setLoadError(null)
-    try {
-      const result = await getClaims(status, signal)
-      setClaims(result)
-      if (result.length === 0) {
-        setSelectedId(null)
-        setDetail(null)
-      } else if (selectedId == null || !result.some((claim) => claim.id === selectedId)) {
-        setSelectedId(result[0].id)
-      }
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setLoadError(error instanceof Error ? error : new Error('載入理賠案件失敗。'))
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [selectedId, status])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadClaims(controller.signal)
-    return () => controller.abort()
-  }, [loadClaims, reloadKey])
-
-  const loadDetail = useCallback(async (id: number, signal?: AbortSignal) => {
-    setDetailLoading(true)
-    setDetailError(null)
-    try {
-      setDetail(await getClaim(id, signal))
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setDetail(null)
-        setDetailError(error instanceof Error ? error : new Error('載入理賠案件詳情失敗。'))
-      }
-    } finally {
-      if (!signal?.aborted) setDetailLoading(false)
-    }
-  }, [])
+  const claimsQuery = useQuery({
+    queryKey: queryKeys.claims.list(status),
+    queryFn: ({ signal }) => getClaims(status, signal),
+  })
+  const claims: Claim[] = claimsQuery.data ?? []
+  const detailQuery = useQuery({
+    queryKey: queryKeys.claims.detail(selectedId ?? 0),
+    queryFn: ({ signal }) => getClaim(selectedId!, signal),
+    enabled: selectedId != null,
+  })
+  const detail = detailQuery.data ?? null
+  const syncClaim = async (next: Claim) => {
+    queryClient.setQueryData(queryKeys.claims.detail(next.id), next)
+    queryClient.setQueryData<Claim[]>(queryKeys.claims.list(status), (current = []) => (
+      current.map((claim) => claim.id === next.id ? next : claim)
+    ))
+    await queryClient.invalidateQueries({ queryKey: queryKeys.claims.all })
+  }
+  const transitionMutation = useMutation({
+    mutationFn: ({ id, request }: { id: number; request: Parameters<typeof transitionClaim>[1] }) => transitionClaim(id, request),
+    onSuccess: syncClaim,
+  })
+  const settlementMutation = useMutation({
+    mutationFn: (action: () => Promise<Claim>) => action(),
+    onSuccess: syncClaim,
+  })
 
   useEffect(() => {
-    if (selectedId == null) {
-      setDetail(null)
-      setDetailError(null)
-      return
-    }
-
-    const controller = new AbortController()
-    void loadDetail(selectedId, controller.signal)
-    return () => controller.abort()
-  }, [loadDetail, selectedId])
+    if (claims.length === 0) setSelectedId(null)
+    else if (selectedId == null || !claims.some((claim) => claim.id === selectedId)) setSelectedId(claims[0].id)
+  }, [claims, selectedId])
 
   const filteredClaims = useMemo(() => {
     const normalized = keyword.trim().toLowerCase()
@@ -200,12 +171,6 @@ function ClaimsPage() {
     [filteredClaims, page],
   )
 
-  const refreshAfterTransition = async (next: Claim) => {
-    setDetail(next)
-    setSelectedId(next.id)
-    await loadClaims()
-  }
-
   const openTransition = (kind: TransitionKind) => {
     setTransitionKind(kind)
     transitionForm.resetFields()
@@ -227,12 +192,14 @@ function ClaimsPage() {
       ? 'pending_documents'
       : 'reviewing'
 
-    setTransitioning(true)
     try {
-      const next = await transitionClaim(detail.id, {
-        targetStatus,
-        assignedAdjuster: transitionKind === 'accept' ? values.assignedAdjuster?.trim() : undefined,
-        reason: values.reason?.trim() || undefined,
+      await transitionMutation.mutateAsync({
+        id: detail.id,
+        request: {
+          targetStatus,
+          assignedAdjuster: transitionKind === 'accept' ? values.assignedAdjuster?.trim() : undefined,
+          reason: values.reason?.trim() || undefined,
+        },
       })
       message.success(
         transitionKind === 'accept'
@@ -242,11 +209,8 @@ function ClaimsPage() {
             : '補件已完成，案件回到審核中。',
       )
       closeTransition()
-      await refreshAfterTransition(next)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '更新案件狀態失敗。')
-    } finally {
-      setTransitioning(false)
     }
   }
 
@@ -267,28 +231,28 @@ function ClaimsPage() {
     if (!detail || !settlementKind) return
     const values = await settlementForm.validateFields()
 
-    setSettling(true)
     try {
-      let next: Claim
+      let action: () => Promise<Claim>
       if (settlementKind === 'liability') {
-        next = await completeClaimLiability(detail.id, {
+        action = () => completeClaimLiability(detail.id, {
           decision: values.decision?.trim() || '',
           liabilityPercentage: values.liabilityPercentage ?? 0,
           reason: values.reason?.trim() || undefined,
         })
       } else if (settlementKind === 'approve') {
-        next = await approveClaimAmount(detail.id, {
+        action = () => approveClaimAmount(detail.id, {
           approvedAmount: values.approvedAmount ?? 0,
           reason: values.reason?.trim() || undefined,
         })
       } else if (settlementKind === 'pay') {
-        next = await completeClaimPayment(detail.id, {
+        action = () => completeClaimPayment(detail.id, {
           paymentMethod: values.paymentMethod?.trim() || '',
           reason: values.reason?.trim() || undefined,
         })
       } else {
-        next = await denyClaim(detail.id, { reason: values.reason?.trim() || '' })
+        action = () => denyClaim(detail.id, { reason: values.reason?.trim() || '' })
       }
+      await settlementMutation.mutateAsync(action)
 
       message.success(
         settlementKind === 'liability'
@@ -300,11 +264,8 @@ function ClaimsPage() {
               : '案件已拒賠結案。',
       )
       closeSettlement()
-      await refreshAfterTransition(next)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '理賠作業失敗。')
-    } finally {
-      setSettling(false)
     }
   }
 
@@ -355,16 +316,16 @@ function ClaimsPage() {
     },
   ], [])
 
-  if (loadError instanceof ApiError && loadError.status === 403) {
+  if (claimsQuery.error instanceof ApiError && claimsQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具理賠資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (loadError) {
+  if (claimsQuery.error) {
     return (
       <ErrorState
         title="理賠案件讀取失敗"
-        message={loadError.message}
-        onRetry={() => setReloadKey((current) => current + 1)}
+        message={claimsQuery.error.message}
+        onRetry={() => void claimsQuery.refetch()}
       />
     )
   }
@@ -392,7 +353,7 @@ function ClaimsPage() {
               <Typography.Title level={3} style={{ margin: 0 }}>理賠管理</Typography.Title>
               <Typography.Text type="secondary">管理事故案件、受理分派、補件與審核進度。</Typography.Text>
             </div>
-            <Button icon={<ReloadOutlined />} onClick={() => setReloadKey((current) => current + 1)}>
+            <Button icon={<ReloadOutlined />} onClick={() => void claimsQuery.refetch()}>
               重新整理
             </Button>
           </Space>
@@ -421,7 +382,7 @@ function ClaimsPage() {
         </Space>
       </Card>
 
-      {loading && claims.length === 0 ? (
+        {claimsQuery.isPending && claims.length === 0 ? (
         <LoadingState rows={6} />
       ) : filteredClaims.length === 0 ? (
         <EmptyState description="目前沒有符合條件的理賠案件" />
@@ -433,7 +394,7 @@ function ClaimsPage() {
               rowKey="id"
               columns={columns}
               dataSource={pagedClaims}
-              loading={loading}
+              loading={claimsQuery.isFetching}
               pagination={false}
               scroll={{ x: 1180 }}
               rowClassName={(record) => record.id === selectedId ? 'claims-selected-row' : ''}
@@ -457,17 +418,17 @@ function ClaimsPage() {
             title={detail ? detail.claimNumber : '案件詳情'}
             extra={detail ? renderStatus(detail.status) : null}
           >
-            {detailLoading ? (
+            {detailQuery.isPending ? (
               <LoadingState rows={5} />
-            ) : detailError instanceof ApiError && detailError.status === 403 ? (
+            ) : detailQuery.error instanceof ApiError && detailQuery.error.status === 403 ? (
               <ForbiddenState requiredRole="具理賠案件查看權限的角色" contact="系統管理員" />
-            ) : detailError instanceof ApiError && detailError.status === 404 ? (
+            ) : detailQuery.error instanceof ApiError && detailQuery.error.status === 404 ? (
               <EmptyState description="指定的理賠案件不存在或已被移除" />
-            ) : detailError ? (
+            ) : detailQuery.error ? (
               <ErrorState
                 title="理賠案件詳情讀取失敗"
-                message={detailError.message}
-                onRetry={selectedId == null ? undefined : () => void loadDetail(selectedId)}
+                message={detailQuery.error.message}
+                onRetry={() => void detailQuery.refetch()}
               />
             ) : !detail ? (
               <EmptyState description="請選擇理賠案件" />
@@ -567,7 +528,7 @@ function ClaimsPage() {
       <Modal
         title={modalTitle}
         open={transitionKind !== null}
-        confirmLoading={transitioning}
+        confirmLoading={transitionMutation.isPending}
         okText="確認"
         cancelText="取消"
         onOk={() => void submitTransition()}
@@ -604,7 +565,7 @@ function ClaimsPage() {
       <Modal
         title={settlementTitle}
         open={settlementKind !== null}
-        confirmLoading={settling}
+        confirmLoading={settlementMutation.isPending}
         okText="確認"
         cancelText="取消"
         onOk={() => void submitSettlement()}

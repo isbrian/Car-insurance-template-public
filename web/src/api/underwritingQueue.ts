@@ -1,4 +1,4 @@
-import { authenticatedFetch } from './http'
+import { authenticatedFetch, toApiError } from './http'
 
 export type UnderwritingRuleResult = {
   id: number
@@ -78,24 +78,8 @@ export type UnderwritingQueueSyncResult = {
   stats: UnderwritingQueueStats
 }
 
-type ProblemDetails = {
-  title?: string
-  detail?: string
-  errors?: Record<string, string[]>
-}
-
 async function readError(response: Response): Promise<Error> {
-  let problem: ProblemDetails | undefined
-  try {
-    problem = (await response.json()) as ProblemDetails
-  } catch {
-    // 非 JSON 錯誤使用 HTTP 狀態文字。
-  }
-
-  const validationMessage = problem?.errors
-    ? Object.values(problem.errors).flat().filter(Boolean).join('；')
-    : undefined
-  return new Error(problem?.detail || validationMessage || problem?.title || `請求失敗（${response.status}）`)
+  return toApiError(response)
 }
 
 async function readJson<T>(response: Response): Promise<T> {

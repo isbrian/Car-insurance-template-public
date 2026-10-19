@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   App,
   Button,
@@ -44,6 +45,7 @@ import type {
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { ApiError } from '../../api/http'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 
 type DocumentTab = 'cases' | 'pending' | 'templates'
 
@@ -92,27 +94,15 @@ function renderDocumentStatus(status: string) {
 
 function DocumentsPage() {
   const { message } = App.useApp()
+  const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<DocumentTab>('cases')
-  const [caseResult, setCaseResult] = useState<CaseDocumentListResponse | null>(null)
-  const [caseLoading, setCaseLoading] = useState(true)
-  const [caseError, setCaseError] = useState<Error | null>(null)
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [status, setStatus] = useState('')
   const [documentType, setDocumentType] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [pendingTotal, setPendingTotal] = useState(0)
-  const [caseReloadKey, setCaseReloadKey] = useState(0)
-
-  const [templates, setTemplates] = useState<DocumentTemplateSummary[]>([])
-  const [templateLoading, setTemplateLoading] = useState(false)
-  const [templateError, setTemplateError] = useState<Error | null>(null)
-  const [templateReloadKey, setTemplateReloadKey] = useState(0)
-  const [selectedTemplate, setSelectedTemplate] = useState<DocumentTemplateDetail | null>(null)
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<Error | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
@@ -120,84 +110,48 @@ function DocumentsPage() {
   const [createForm] = Form.useForm<CreateTemplateFormValues>()
   const [versionForm] = Form.useForm<AddVersionFormValues>()
 
-  const loadPendingTotal = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const result = await getCaseDocuments({ status: 'returned', page: 1, pageSize: 1 }, signal)
-      setPendingTotal(result.total)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') setPendingTotal(0)
-    }
-  }, [])
+  const caseRequest = {
+    keyword,
+    status: activeTab === 'pending' ? 'returned' : status,
+    documentType,
+    page,
+    pageSize,
+  }
+  const casesQuery = useQuery({
+    queryKey: queryKeys.documents.cases(caseRequest),
+    queryFn: ({ signal }) => getCaseDocuments(caseRequest, signal),
+    enabled: activeTab !== 'templates',
+  })
+  const pendingTotalQuery = useQuery({
+    queryKey: queryKeys.documents.pendingTotal,
+    queryFn: ({ signal }) => getCaseDocuments({ status: 'returned', page: 1, pageSize: 1 }, signal),
+  })
+  const templatesQuery = useQuery({
+    queryKey: queryKeys.documents.templates,
+    queryFn: ({ signal }) => getDocumentTemplates(signal),
+    enabled: activeTab === 'templates',
+  })
+  const detailQuery = useQuery({
+    queryKey: queryKeys.documents.template(selectedTemplateId ?? 0),
+    queryFn: ({ signal }) => getDocumentTemplate(selectedTemplateId!, signal),
+    enabled: detailOpen && selectedTemplateId !== null,
+  })
+  const caseResult: CaseDocumentListResponse | undefined = casesQuery.data
+  const caseLoading = casesQuery.isFetching
+  const caseError = casesQuery.error
+  const pendingTotal = activeTab === 'pending' && caseResult
+    ? caseResult.total
+    : (pendingTotalQuery.data?.total ?? 0)
+  const templates: DocumentTemplateSummary[] = templatesQuery.data ?? []
+  const templateLoading = templatesQuery.isFetching
+  const templateError = templatesQuery.error
+  const selectedTemplate: DocumentTemplateDetail | undefined = detailQuery.data
+  const detailLoading = detailQuery.isFetching
+  const detailError = detailQuery.error
 
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadPendingTotal(controller.signal)
-    return () => controller.abort()
-  }, [loadPendingTotal, caseReloadKey])
-
-  const loadCases = useCallback(async (signal?: AbortSignal) => {
-    if (activeTab === 'templates') return
-    setCaseLoading(true)
-    setCaseError(null)
-    try {
-      const result = await getCaseDocuments({
-        keyword,
-        status: activeTab === 'pending' ? 'returned' : status,
-        documentType,
-        page,
-        pageSize,
-      }, signal)
-      setCaseResult(result)
-      if (activeTab === 'pending') setPendingTotal(result.total)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setCaseError(error instanceof Error ? error : new Error('載入文件失敗。'))
-      }
-    } finally {
-      setCaseLoading(false)
-    }
-  }, [activeTab, documentType, keyword, page, pageSize, status])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadCases(controller.signal)
-    return () => controller.abort()
-  }, [loadCases, caseReloadKey])
-
-  const loadTemplates = useCallback(async (signal?: AbortSignal) => {
-    if (activeTab !== 'templates') return
-    setTemplateLoading(true)
-    setTemplateError(null)
-    try {
-      setTemplates(await getDocumentTemplates(signal))
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setTemplateError(error instanceof Error ? error : new Error('載入文件範本失敗。'))
-      }
-    } finally {
-      setTemplateLoading(false)
-    }
-  }, [activeTab])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadTemplates(controller.signal)
-    return () => controller.abort()
-  }, [loadTemplates, templateReloadKey])
-
-  const openTemplateDetail = async (id: number) => {
+  const openTemplateDetail = (id: number) => {
     setDetailOpen(true)
     setSelectedTemplateId(id)
-    setSelectedTemplate(null)
-    setDetailError(null)
-    setDetailLoading(true)
-    try {
-      setSelectedTemplate(await getDocumentTemplate(id))
-    } catch (error) {
-      setDetailError(error instanceof Error ? error : new Error('載入範本詳情失敗。'))
-    } finally {
-      setDetailLoading(false)
-    }
   }
 
   const submitCreateTemplate = async () => {
@@ -220,8 +174,8 @@ function DocumentsPage() {
       message.success('文件範本已建立。')
       setCreateOpen(false)
       createForm.resetFields()
-      setTemplateReloadKey((value) => value + 1)
-      await openTemplateDetail(created.id)
+      await queryClient.invalidateQueries({ queryKey: queryKeys.documents.templates })
+      openTemplateDetail(created.id)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '建立文件範本失敗。')
     } finally {
@@ -248,10 +202,10 @@ function DocumentsPage() {
     setSubmitting(true)
     try {
       const updated = await addDocumentTemplateVersion(selectedTemplate.id, request)
-      setSelectedTemplate(updated)
+      queryClient.setQueryData(queryKeys.documents.template(selectedTemplate.id), updated)
       setVersionOpen(false)
       versionForm.resetFields()
-      setTemplateReloadKey((value) => value + 1)
+      await queryClient.invalidateQueries({ queryKey: queryKeys.documents.templates })
       message.success(values.activate ? '新版本已新增並啟用。' : '新版本已新增。')
     } catch (error) {
       message.error(error instanceof Error ? error.message : '新增範本版本失敗。')
@@ -265,8 +219,8 @@ function DocumentsPage() {
     setSubmitting(true)
     try {
       const updated = await setDocumentTemplateActiveVersion(selectedTemplate.id, versionId)
-      setSelectedTemplate(updated)
-      setTemplateReloadKey((value) => value + 1)
+      queryClient.setQueryData(queryKeys.documents.template(selectedTemplate.id), updated)
+      await queryClient.invalidateQueries({ queryKey: queryKeys.documents.templates })
       message.success(`已切換啟用版本為 ${updated.activeVersion ?? '-' }。`)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '切換啟用版本失敗。')
@@ -411,7 +365,7 @@ function DocumentsPage() {
       width: 110,
       onCell: () => responsiveCell('操作'),
       render: (_, record) => (
-        <Button type="link" icon={<FileSearchOutlined />} onClick={() => void openTemplateDetail(record.id)}>
+        <Button type="link" icon={<FileSearchOutlined />} onClick={() => openTemplateDetail(record.id)}>
           版本管理
         </Button>
       ),
@@ -453,7 +407,10 @@ function DocumentsPage() {
           resetCasePage()
         }}
       />
-      <Button icon={<ReloadOutlined />} onClick={() => setCaseReloadKey((value) => value + 1)}>
+      <Button icon={<ReloadOutlined />} onClick={() => {
+        void casesQuery.refetch()
+        void pendingTotalQuery.refetch()
+      }}>
         重新整理
       </Button>
     </div>
@@ -469,7 +426,7 @@ function DocumentsPage() {
         <ErrorState
           title="案件文件載入失敗"
           message={caseError.message}
-          onRetry={() => setCaseReloadKey((value) => value + 1)}
+          onRetry={() => void casesQuery.refetch()}
         />
       )
     }
@@ -511,7 +468,7 @@ function DocumentsPage() {
         <ErrorState
           title="文件範本載入失敗"
           message={templateError.message}
-          onRetry={() => setTemplateReloadKey((value) => value + 1)}
+          onRetry={() => void templatesQuery.refetch()}
         />
       )
     }
@@ -521,7 +478,7 @@ function DocumentsPage() {
         <div className="documents-toolbar documents-template-toolbar">
           <Typography.Text type="secondary">歷史版本會永久保留，已出單資料應沿用當時版本。</Typography.Text>
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={() => setTemplateReloadKey((value) => value + 1)}>重新整理</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => void templatesQuery.refetch()}>重新整理</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>建立範本</Button>
           </Space>
         </div>
@@ -605,9 +562,7 @@ function DocumentsPage() {
         footer={null}
         onCancel={() => {
           setDetailOpen(false)
-          setSelectedTemplate(null)
           setSelectedTemplateId(null)
-          setDetailError(null)
         }}
       >
         {detailLoading ? (
@@ -620,7 +575,7 @@ function DocumentsPage() {
           <ErrorState
             title="文件範本詳情載入失敗"
             message={detailError.message}
-            onRetry={selectedTemplateId ? () => void openTemplateDetail(selectedTemplateId) : undefined}
+            onRetry={() => void detailQuery.refetch()}
           />
         ) : !selectedTemplate ? (
           <EmptyState description="沒有可顯示的文件範本詳情" />

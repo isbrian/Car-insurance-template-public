@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Card, Table, message } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
@@ -9,44 +10,40 @@ import ListPageShell from '../../components/shared/ListPageShell'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
 import VehicleFormModal from './VehicleFormModal'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
+import { queryKeys } from '../../query/queryKeys'
 
 function VehicleListPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [messageApi, messageContextHolder] = message.useMessage()
-  const [items, setItems] = useState<Vehicle[]>([])
-  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [keyword, setKeyword] = useState('')
-  const [debouncedKeyword, setDebouncedKeyword] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [reloadKey, setReloadKey] = useState(0)
+  const debouncedKeyword = useDebouncedValue(keyword, 300)
+  const vehiclesQuery = useQuery({
+    queryKey: queryKeys.vehicles.list(debouncedKeyword, page, 20),
+    queryFn: ({ signal }) => getVehicles(debouncedKeyword, page, 20, signal),
+    placeholderData: keepPreviousData,
+  })
+  const createMutation = useMutation({
+    mutationFn: createVehicle,
+    onSuccess: async () => {
+      messageApi.success('車輛新增成功')
+      setModalOpen(false)
+      setPage(1)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.vehicles.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.customers.all }),
+      ])
+    },
+    onError: (requestError: Error) => {
+      messageApi.error(requestError.message || '新增車輛失敗')
+    },
+  })
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedKeyword(keyword), 300)
-    return () => window.clearTimeout(timer)
-  }, [keyword])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-
-    void getVehicles(debouncedKeyword, page, 20, controller.signal)
-      .then((response) => {
-        setItems(response.items)
-        setTotal(response.totalCount)
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取車輛資料失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [debouncedKeyword, page, reloadKey])
+  const items: Vehicle[] = vehiclesQuery.data?.items ?? []
+  const total = vehiclesQuery.data?.totalCount ?? 0
 
   const handleSearchChange = (value: string) => {
     setKeyword(value)
@@ -54,19 +51,7 @@ function VehicleListPage() {
   }
 
   const handleCreate = async (values: VehicleCreateRequest) => {
-    setSaving(true)
-    try {
-      await createVehicle(values)
-      messageApi.success('車輛新增成功')
-      setModalOpen(false)
-      setPage(1)
-      setReloadKey((current) => current + 1)
-    } catch (requestError: unknown) {
-      messageApi.error(requestError instanceof Error ? requestError.message : '新增車輛失敗')
-      throw requestError
-    } finally {
-      setSaving(false)
-    }
+    await createMutation.mutateAsync(values)
   }
 
   const columns = [
@@ -92,12 +77,12 @@ function VehicleListPage() {
     },
   ]
 
-  if (error instanceof ApiError && error.status === 403) {
+  if (vehiclesQuery.error instanceof ApiError && vehiclesQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具車輛資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (error) {
-    return <ErrorState title="車輛資料讀取失敗" message={error.message} onRetry={() => setReloadKey((current) => current + 1)} />
+  if (vehiclesQuery.error) {
+    return <ErrorState title="車輛資料讀取失敗" message={vehiclesQuery.error.message} onRetry={() => void vehiclesQuery.refetch()} />
   }
 
   return (
@@ -114,7 +99,7 @@ function VehicleListPage() {
         total={total}
         onPageChange={setPage}
       >
-        {loading && items.length === 0 ? (
+        {vehiclesQuery.isPending && items.length === 0 ? (
           <LoadingState />
         ) : items.length === 0 ? (
           <EmptyState
@@ -128,14 +113,14 @@ function VehicleListPage() {
               rowKey="id"
               columns={columns}
               dataSource={items}
-              loading={loading}
+              loading={vehiclesQuery.isFetching}
               pagination={false}
               rowSelection={{}}
               scroll={{ x: 900 }}
             />
           </Card>
         )}
-        <VehicleFormModal open={modalOpen} confirmLoading={saving} onCancel={() => setModalOpen(false)} onSubmit={handleCreate} />
+        <VehicleFormModal open={modalOpen} confirmLoading={createMutation.isPending} onCancel={() => setModalOpen(false)} onSubmit={handleCreate} />
       </ListPageShell>
     </>
   )

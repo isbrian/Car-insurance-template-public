@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Alert, Button, Card, Descriptions, Empty, Space, Table, Tag, Typography } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -7,52 +7,34 @@ import type { CustomerDetails } from '../../api/customers'
 import { ApiError } from '../../api/http'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 
 function CustomerDetailPage() {
   const navigate = useNavigate()
   const { id } = useParams()
-  const [customer, setCustomer] = useState<CustomerDetails | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
+  const customerId = Number(id)
+  const isValidId = Boolean(id) && Number.isInteger(customerId) && customerId > 0
+  const customerQuery = useQuery({
+    queryKey: queryKeys.customers.detail(customerId),
+    queryFn: ({ signal }) => getCustomer(customerId, signal),
+    enabled: isValidId,
+  })
+  const customer: CustomerDetails | null = isValidId ? customerQuery.data ?? null : null
 
-  const loadCustomer = () => {
-    const customerId = Number(id)
-    if (!id || !Number.isInteger(customerId) || customerId <= 0) {
-      setCustomer(null)
-      setError(null)
-      setLoading(false)
-      return
-    }
-
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    void getCustomer(customerId, controller.signal)
-      .then(setCustomer)
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取客戶資料失敗'))
-      })
-      .finally(() => setLoading(false))
-    return () => controller.abort()
-  }
-
-  useEffect(() => loadCustomer(), [id])
-
-  if (loading && !customer && !error) {
+  if (customerQuery.isPending && isValidId) {
     return <LoadingState rows={8} />
   }
 
-  if (error instanceof ApiError && error.status === 403) {
+  if (customerQuery.error instanceof ApiError && customerQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具客戶資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (error) {
+  if (customerQuery.error) {
     return (
       <ErrorState
         title="客戶資料讀取失敗"
-        message={error.message}
-        onRetry={loadCustomer}
+        message={customerQuery.error.message}
+        onRetry={() => void customerQuery.refetch()}
         fallback={<Button onClick={() => navigate('/customers')}>返回客戶列表</Button>}
       />
     )

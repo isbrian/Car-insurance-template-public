@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -40,6 +41,7 @@ import type {
   UnderwritingQueueList,
   UnderwritingRuleResult,
 } from '../../api/underwritingQueue'
+import { queryKeys } from '../../query/queryKeys'
 
 const currencyFormatter = new Intl.NumberFormat('zh-TW', {
   style: 'currency',
@@ -98,111 +100,68 @@ function resultVisual(result: UnderwritingRuleResult) {
 
 function UnderwritingQueuePage() {
   const { message } = App.useApp()
-  const [queue, setQueue] = useState<UnderwritingQueueList | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [syncing, setSyncing] = useState(false)
-  const [loadError, setLoadError] = useState<Error | null>(null)
+  const queryClient = useQueryClient()
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [detail, setDetail] = useState<UnderwritingCaseDetail | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<Error | null>(null)
   const [opinion, setOpinion] = useState('')
-  const [acting, setActing] = useState(false)
-
-  const loadQueue = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true)
-    setLoadError(null)
-    try {
-      const result = await getUnderwritingQueue(keyword, status, page, pageSize, signal)
-      setQueue(result)
-      if (result.items.length === 0) {
-        setSelectedId(null)
-        setDetail(null)
-      } else if (selectedId == null || !result.items.some((item) => item.id === selectedId)) {
-        setSelectedId(result.items[0].id)
-      }
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setLoadError(error instanceof Error ? error : new Error('載入核保佇列失敗。'))
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [keyword, page, pageSize, selectedId, status])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadQueue(controller.signal)
-    return () => controller.abort()
-  }, [loadQueue])
-
-  const loadDetail = useCallback(async (id: number, signal?: AbortSignal) => {
-    setDetailLoading(true)
-    setDetailError(null)
-    try {
-      const result = await getUnderwritingCase(id, signal)
-      setDetail(result)
-      setOpinion(result.opinion ?? '')
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setDetail(null)
-        setDetailError(error instanceof Error ? error : new Error('載入核保案件失敗。'))
-      }
-    } finally {
-      if (!signal?.aborted) setDetailLoading(false)
-    }
-  }, [])
+  const queueQuery = useQuery({
+    queryKey: queryKeys.underwritingQueue.list(keyword, status, page, pageSize),
+    queryFn: ({ signal }) => getUnderwritingQueue(keyword, status, page, pageSize, signal),
+  })
+  const queue: UnderwritingQueueList | null = queueQuery.data ?? null
+  const detailQuery = useQuery({
+    queryKey: queryKeys.underwritingQueue.detail(selectedId ?? 0),
+    queryFn: ({ signal }) => getUnderwritingCase(selectedId!, signal),
+    enabled: selectedId != null,
+  })
+  const detail = detailQuery.data ?? null
+  const syncMutation = useMutation({
+    mutationFn: syncUnderwritingQueue,
+    onSuccess: async (result) => {
+      message.success(`同步完成：處理 ${result.processedCount} 件，新建 ${result.createdCount} 件。`)
+      await queryClient.invalidateQueries({ queryKey: queryKeys.underwritingQueue.all })
+    },
+  })
+  const decisionMutation = useMutation({
+    mutationFn: (action: () => Promise<UnderwritingCaseDetail>) => action(),
+    onSuccess: async (next) => {
+      queryClient.setQueryData(queryKeys.underwritingQueue.detail(next.id), next)
+      setOpinion(next.opinion ?? '')
+      await queryClient.invalidateQueries({ queryKey: queryKeys.underwritingQueue.all })
+    },
+  })
 
   useEffect(() => {
-    if (selectedId == null) {
-      setDetail(null)
-      setDetailError(null)
-      setOpinion('')
-      return
-    }
+    const items = queue?.items ?? []
+    if (items.length === 0) setSelectedId(null)
+    else if (selectedId == null || !items.some((item) => item.id === selectedId)) setSelectedId(items[0].id)
+  }, [queue, selectedId])
 
-    const controller = new AbortController()
-    void loadDetail(selectedId, controller.signal)
-    return () => controller.abort()
-  }, [loadDetail, selectedId])
+  useEffect(() => {
+    setOpinion(detail?.opinion ?? '')
+  }, [detail?.id, detail?.opinion])
 
   const handleSync = async () => {
-    setSyncing(true)
     try {
-      const result = await syncUnderwritingQueue()
-      message.success(`同步完成：處理 ${result.processedCount} 件，新建 ${result.createdCount} 件。`)
-      await loadQueue()
+      await syncMutation.mutateAsync()
     } catch (error) {
       message.error(error instanceof Error ? error.message : '同步核保佇列失敗。')
-    } finally {
-      setSyncing(false)
     }
-  }
-
-  const refreshAfterDecision = async (next: UnderwritingCaseDetail) => {
-    setDetail(next)
-    setOpinion(next.opinion ?? '')
-    await loadQueue()
   }
 
   const runDecision = async (
     label: string,
     action: () => Promise<UnderwritingCaseDetail>,
   ) => {
-    setActing(true)
     try {
-      const next = await action()
+      await decisionMutation.mutateAsync(action)
       message.success(`${label}完成。`)
-      await refreshAfterDecision(next)
     } catch (error) {
       message.error(error instanceof Error ? error.message : `${label}失敗。`)
-    } finally {
-      setActing(false)
     }
   }
 
@@ -269,16 +228,16 @@ function UnderwritingQueuePage() {
   const canRequestDocuments = detail?.status === 'pending_review' || detail?.status === 'pending_documents'
   const canReevaluate = detail?.status === 'pending_documents'
 
-  if (loading && !queue) {
+  if (queueQuery.isPending && !queue) {
     return <LoadingState rows={8} />
   }
 
-  if (loadError instanceof ApiError && loadError.status === 403) {
+  if (queueQuery.error instanceof ApiError && queueQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具核保資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (loadError) {
-    return <ErrorState title="核保佇列載入失敗" message={loadError.message} onRetry={() => void loadQueue()} />
+  if (queueQuery.error) {
+    return <ErrorState title="核保佇列載入失敗" message={queueQuery.error.message} onRetry={() => void queueQuery.refetch()} />
   }
 
   return (
@@ -288,7 +247,7 @@ function UnderwritingQueuePage() {
           <Typography.Title level={2}>核保作業</Typography.Title>
           <Typography.Text type="secondary">核保佇列、自動規則命中結果與人工覆核。</Typography.Text>
         </div>
-        <Button type="primary" icon={<SyncOutlined />} loading={syncing} onClick={handleSync}>
+        <Button type="primary" icon={<SyncOutlined />} loading={syncMutation.isPending} onClick={handleSync}>
           同步送審案件
         </Button>
       </div>
@@ -345,13 +304,13 @@ function UnderwritingQueuePage() {
                 { value: 'auto_rejected', label: '自動退件' },
               ]}
             />
-            <Button icon={<ReloadOutlined />} onClick={() => void loadQueue()}>重新整理</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => void queueQuery.refetch()}>重新整理</Button>
           </div>
 
           <Table<UnderwritingQueueItem>
             className="responsive-data-table"
             rowKey="id"
-            loading={loading}
+            loading={queueQuery.isFetching}
             columns={columns}
             dataSource={queue?.items ?? []}
             rowClassName={(record) => record.id === selectedId ? 'underwriting-selected-row' : ''}
@@ -373,15 +332,15 @@ function UnderwritingQueuePage() {
           title={detail ? `規則命中結果 ${detail.applicationNumber}` : '規則命中結果'}
           extra={detail ? <Tag color={statusColors[detail.status]}>{statusLabels[detail.status] ?? detail.status}</Tag> : null}
         >
-          {detailLoading ? (
+          {detailQuery.isPending ? (
             <LoadingState rows={4} />
-          ) : detailError instanceof ApiError && detailError.status === 403 ? (
+          ) : detailQuery.error instanceof ApiError && detailQuery.error.status === 403 ? (
             <ForbiddenState requiredRole="具核保案件查看權限的角色" contact="系統管理員" />
-          ) : detailError ? (
+          ) : detailQuery.error ? (
             <ErrorState
               title="核保案件載入失敗"
-              message={detailError.message}
-              onRetry={() => selectedId != null && void loadDetail(selectedId)}
+              message={detailQuery.error.message}
+              onRetry={() => void detailQuery.refetch()}
             />
           ) : !detail ? (
             <EmptyState description="請從左側選擇核保案件" />
@@ -428,21 +387,21 @@ function UnderwritingQueuePage() {
                 <Button
                   type="primary"
                   disabled={!canReview}
-                  loading={acting}
+                  loading={decisionMutation.isPending}
                   onClick={() => detail && void runDecision('核准', () => approveUnderwritingCase(detail.id, opinion.trim()))}
                 >
                   核准
                 </Button>
-                <Button disabled={!canRequestDocuments} loading={acting} onClick={() => void handleRequestDocuments()}>
+                <Button disabled={!canRequestDocuments} loading={decisionMutation.isPending} onClick={() => void handleRequestDocuments()}>
                   要求補件
                 </Button>
-                <Button danger disabled={!canReview} loading={acting} onClick={() => void handleReject()}>
+                <Button danger disabled={!canReview} loading={decisionMutation.isPending} onClick={() => void handleReject()}>
                   退件
                 </Button>
                 {canReevaluate && (
                   <Button
                     icon={<ReloadOutlined />}
-                    loading={acting}
+                    loading={decisionMutation.isPending}
                     onClick={() => detail && void runDecision('重新評估', () => reevaluateUnderwritingCase(detail.id))}
                   >
                     重新評估

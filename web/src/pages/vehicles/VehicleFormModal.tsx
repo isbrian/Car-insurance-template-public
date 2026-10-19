@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Alert, Form, Input, Modal, Select } from 'antd'
 import { getCustomers } from '../../api/customers'
 import type { Customer } from '../../api/customers'
 import type { VehicleCreateRequest } from '../../api/vehicles'
+import { queryKeys } from '../../query/queryKeys'
 
 type VehicleFormModalProps = {
   open: boolean
@@ -13,27 +14,12 @@ type VehicleFormModalProps = {
 
 function VehicleFormModal({ open, confirmLoading, onCancel, onSubmit }: VehicleFormModalProps) {
   const [form] = Form.useForm<VehicleCreateRequest>()
-  const [customers, setCustomers] = useState<Customer[]>([])
-  const [customersLoading, setCustomersLoading] = useState(false)
-  const [customersError, setCustomersError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-
-    const controller = new AbortController()
-    setCustomersLoading(true)
-    setCustomersError(null)
-
-    void getCustomers('', 1, 100, controller.signal)
-      .then((response) => setCustomers(response.items))
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setCustomersError(requestError instanceof Error ? requestError.message : '讀取車主資料失敗')
-      })
-      .finally(() => setCustomersLoading(false))
-
-    return () => controller.abort()
-  }, [open])
+  const customersQuery = useQuery({
+    queryKey: queryKeys.customers.list('', 1, 100),
+    queryFn: ({ signal }) => getCustomers('', 1, 100, signal),
+    enabled: open,
+  })
+  const customers: Customer[] = customersQuery.data?.items ?? []
 
   const handleOk = async () => {
     try {
@@ -62,7 +48,7 @@ function VehicleFormModal({ open, confirmLoading, onCancel, onSubmit }: VehicleF
       destroyOnHidden
     >
       <Form form={form} layout="vertical">
-        {customersError ? <Alert type="error" showIcon message="車主資料讀取失敗" description={customersError} style={{ marginBottom: 16 }} /> : null}
+        {customersQuery.error ? <Alert type="error" showIcon message="車主資料讀取失敗" description={customersQuery.error.message} style={{ marginBottom: 16 }} /> : null}
         <Form.Item name="licensePlate" label="車牌號碼" rules={[{ required: true, whitespace: true, message: '請輸入車牌號碼' }]}>
           <Input placeholder="例如：ABC-1234" />
         </Form.Item>
@@ -88,8 +74,8 @@ function VehicleFormModal({ open, confirmLoading, onCancel, onSubmit }: VehicleF
           <Select
             showSearch
             optionFilterProp="label"
-            loading={customersLoading}
-            disabled={Boolean(customersError)}
+            loading={customersQuery.isFetching}
+            disabled={Boolean(customersQuery.error)}
             placeholder="請選擇車主"
             options={customers.map((customer) => ({
               value: customer.id,

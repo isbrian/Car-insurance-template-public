@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { App as AntApp, Card, Input, Select, Space, Switch, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ApiError } from '../../api/http'
 import { getUsers, updateUserActive, updateUserRole, USER_ROLES } from '../../api/users'
 import type { UserAccount, UserRole } from '../../api/users'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
+import { queryKeys } from '../../query/queryKeys'
 
 function formatUpdatedAt(value: string): string {
   const date = new Date(value)
@@ -20,28 +22,34 @@ function formatUpdatedAt(value: string): string {
 
 function UserManagementPage() {
   const { message } = AntApp.useApp()
-  const [users, setUsers] = useState<UserAccount[]>([])
+  const queryClient = useQueryClient()
   const [keyword, setKeyword] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-  const [savingIds, setSavingIds] = useState<Set<number>>(() => new Set())
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-
-    void getUsers(controller.signal)
-      .then(setUsers)
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取使用者資料失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [reloadKey])
+  const usersQuery = useQuery({
+    queryKey: queryKeys.users.all,
+    queryFn: ({ signal }) => getUsers(signal),
+  })
+  const updateCachedUser = (updated: UserAccount) => {
+    queryClient.setQueryData<UserAccount[]>(queryKeys.users.all, (current = []) => (
+      current.map((user) => user.id === updated.id ? updated : user)
+    ))
+  }
+  const roleMutation = useMutation({
+    mutationFn: ({ id, role }: { id: number; role: UserRole }) => updateUserRole(id, role),
+    onSuccess: (updated) => {
+      updateCachedUser(updated)
+      message.success(`${updated.displayName} 的角色已更新為「${updated.role}」`)
+    },
+    onError: (requestError: Error) => message.error(requestError.message || '角色更新失敗'),
+  })
+  const activeMutation = useMutation({
+    mutationFn: ({ id, isActive }: { id: number; isActive: boolean }) => updateUserActive(id, isActive),
+    onSuccess: (updated) => {
+      updateCachedUser(updated)
+      message.success(`${updated.displayName} 已${updated.isActive ? '啟用' : '停用'}`)
+    },
+    onError: (requestError: Error) => message.error(requestError.message || '帳號狀態更新失敗'),
+  })
+  const users = usersQuery.data ?? []
 
   const filteredUsers = useMemo(() => {
     const normalized = keyword.trim().toLocaleLowerCase('zh-TW')
@@ -56,56 +64,21 @@ function UserManagementPage() {
     ].some((value) => value.toLocaleLowerCase('zh-TW').includes(normalized)))
   }, [keyword, users])
 
-  const setSaving = (id: number, saving: boolean) => {
-    setSavingIds((current) => {
-      const next = new Set(current)
-      if (saving) next.add(id)
-      else next.delete(id)
-      return next
-    })
-  }
-
-  const replaceUser = (updated: UserAccount) => {
-    setUsers((current) => current.map((user) => user.id === updated.id ? updated : user))
-  }
-
   const handleRoleChange = async (user: UserAccount, role: UserRole) => {
     if (role === user.role) return
-
-    const previous = user
-    replaceUser({ ...user, role })
-    setSaving(user.id, true)
-
-    try {
-      const updated = await updateUserRole(user.id, role)
-      replaceUser(updated)
-      message.success(`${user.displayName} 的角色已更新為「${updated.role}」`)
-    } catch (requestError: unknown) {
-      replaceUser(previous)
-      message.error(requestError instanceof Error ? requestError.message : '角色更新失敗')
-    } finally {
-      setSaving(user.id, false)
-    }
+    await roleMutation.mutateAsync({ id: user.id, role }).catch(() => undefined)
   }
 
   const handleActiveChange = async (user: UserAccount, isActive: boolean) => {
     if (isActive === user.isActive) return
 
-    const previous = user
-    replaceUser({ ...user, isActive })
-    setSaving(user.id, true)
-
-    try {
-      const updated = await updateUserActive(user.id, isActive)
-      replaceUser(updated)
-      message.success(`${user.displayName} 已${updated.isActive ? '啟用' : '停用'}`)
-    } catch (requestError: unknown) {
-      replaceUser(previous)
-      message.error(requestError instanceof Error ? requestError.message : '帳號狀態更新失敗')
-    } finally {
-      setSaving(user.id, false)
-    }
+    await activeMutation.mutateAsync({ id: user.id, isActive }).catch(() => undefined)
   }
+
+  const isSaving = (id: number) => (
+    (roleMutation.isPending && roleMutation.variables.id === id)
+    || (activeMutation.isPending && activeMutation.variables.id === id)
+  )
 
   const columns: ColumnsType<UserAccount> = [
     {
@@ -130,7 +103,7 @@ function UserManagementPage() {
           aria-label={`${user.displayName} 的角色`}
           value={role}
           options={USER_ROLES.map((value) => ({ value, label: value }))}
-          disabled={savingIds.has(user.id)}
+          disabled={isSaving(user.id)}
           onChange={(value) => void handleRoleChange(user, value)}
           style={{ width: '100%' }}
         />
@@ -148,8 +121,8 @@ function UserManagementPage() {
             checked={isActive}
             checkedChildren="啟用"
             unCheckedChildren="停用"
-            disabled={savingIds.has(user.id)}
-            loading={savingIds.has(user.id)}
+            disabled={isSaving(user.id)}
+            loading={isSaving(user.id)}
             onChange={(checked) => void handleActiveChange(user, checked)}
           />
           <Tag color={isActive ? 'success' : 'default'}>{isActive ? '使用中' : '已停用'}</Tag>
@@ -165,16 +138,16 @@ function UserManagementPage() {
     },
   ]
 
-  if (error instanceof ApiError && error.kind === 'forbidden') {
+  if (usersQuery.error instanceof ApiError && usersQuery.error.kind === 'forbidden') {
     return <ForbiddenState requiredRole="系統管理員" contact="系統管理員" />
   }
 
-  if (error) {
+  if (usersQuery.error) {
     return (
       <ErrorState
         title="使用者資料讀取失敗"
-        message={error.message}
-        onRetry={() => setReloadKey((current) => current + 1)}
+        message={usersQuery.error.message}
+        onRetry={() => void usersQuery.refetch()}
       />
     )
   }
@@ -199,7 +172,7 @@ function UserManagementPage() {
         </Space>
       </Card>
 
-      {loading && users.length === 0 ? (
+      {usersQuery.isPending && users.length === 0 ? (
         <LoadingState rows={6} />
       ) : users.length === 0 ? (
         <EmptyState description="尚無使用者資料" />
@@ -211,7 +184,7 @@ function UserManagementPage() {
             rowKey="id"
             columns={columns}
             dataSource={filteredUsers}
-            loading={loading}
+            loading={usersQuery.isFetching}
             pagination={false}
             scroll={{ x: 980 }}
           />

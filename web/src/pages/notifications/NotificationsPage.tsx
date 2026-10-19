@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   App,
   Badge,
@@ -31,6 +32,7 @@ import type { NotificationItem, NotificationListResponse } from '../../api/notif
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { ApiError } from '../../api/http'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 
 const channelOptions = [
   { value: '', label: '全部管道' },
@@ -66,12 +68,7 @@ function formatDateTime(value: string | null | undefined) {
 
 function NotificationsPage() {
   const { message } = App.useApp()
-  const [inAppItems, setInAppItems] = useState<NotificationItem[]>([])
-  const [inAppLoading, setInAppLoading] = useState(true)
-  const [inAppError, setInAppError] = useState<Error | null>(null)
-  const [history, setHistory] = useState<NotificationListResponse>({ items: [], page: 1, pageSize: 10, total: 0 })
-  const [historyLoading, setHistoryLoading] = useState(true)
-  const [historyError, setHistoryError] = useState<Error | null>(null)
+  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [channel, setChannel] = useState('')
@@ -85,74 +82,55 @@ function NotificationsPage() {
   const [retrying, setRetrying] = useState(false)
   const [retryForm] = Form.useForm<{ recipient: string }>()
 
+  const historyRequest = {
+    keyword: keyword || undefined,
+    channel: channel || undefined,
+    status: status || undefined,
+    eventType: eventType.trim() || undefined,
+    page,
+    pageSize,
+  }
+  const inAppQuery = useQuery({
+    queryKey: queryKeys.notifications.inApp,
+    queryFn: async ({ signal }) => {
+      const firstPage = await getNotifications({ channel: 'in_app', page: 1, pageSize: 100 }, signal)
+      const items = [...firstPage.items]
+      const pageCount = Math.ceil(firstPage.total / firstPage.pageSize)
+      for (let nextPage = 2; nextPage <= pageCount; nextPage += 1) {
+        const result = await getNotifications({ channel: 'in_app', page: nextPage, pageSize: 100 }, signal)
+        items.push(...result.items)
+      }
+      return items
+    },
+  })
+  const historyQuery = useQuery({
+    queryKey: queryKeys.notifications.history(historyRequest),
+    queryFn: ({ signal }) => getNotifications(historyRequest, signal),
+  })
+  const inAppItems = inAppQuery.data ?? []
+  const inAppLoading = inAppQuery.isFetching
+  const inAppError = inAppQuery.error
+  const history: NotificationListResponse = historyQuery.data
+    ?? { items: [], page: 1, pageSize: 10, total: 0 }
+  const historyLoading = historyQuery.isFetching
+  const historyError = historyQuery.error
+
   const unreadItems = useMemo(
     () => inAppItems.filter((item) => !item.readAtUtc),
     [inAppItems],
   )
 
-  const loadInApp = useCallback(async (signal?: AbortSignal) => {
-    setInAppLoading(true)
-    setInAppError(null)
-    try {
-      const firstPage = await getNotifications({ channel: 'in_app', page: 1, pageSize: 100 }, signal)
-      const items = [...firstPage.items]
-      const pageCount = Math.ceil(firstPage.total / firstPage.pageSize)
-
-      for (let nextPage = 2; nextPage <= pageCount; nextPage += 1) {
-        const result = await getNotifications({ channel: 'in_app', page: nextPage, pageSize: 100 }, signal)
-        items.push(...result.items)
-      }
-
-      setInAppItems(items)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setInAppError(error instanceof Error ? error : new Error('載入站內通知失敗。'))
-      }
-    } finally {
-      setInAppLoading(false)
-    }
-  }, [])
-
-  const loadHistory = useCallback(async (signal?: AbortSignal) => {
-    setHistoryLoading(true)
-    setHistoryError(null)
-    try {
-      const result = await getNotifications({
-        keyword: keyword || undefined,
-        channel: channel || undefined,
-        status: status || undefined,
-        eventType: eventType.trim() || undefined,
-        page,
-        pageSize,
-      }, signal)
-      setHistory(result)
-    } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
-        setHistoryError(error instanceof Error ? error : new Error('載入發送紀錄失敗。'))
-      }
-    } finally {
-      setHistoryLoading(false)
-    }
-  }, [channel, eventType, keyword, page, pageSize, status])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadInApp(controller.signal)
-    return () => controller.abort()
-  }, [loadInApp])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    void loadHistory(controller.signal)
-    return () => controller.abort()
-  }, [loadHistory])
-
   const syncNotification = (updated: NotificationItem) => {
-    setInAppItems((items) => items.map((item) => item.id === updated.id ? updated : item))
-    setHistory((current) => ({
-      ...current,
-      items: current.items.map((item) => item.id === updated.id ? updated : item),
-    }))
+    queryClient.setQueryData<NotificationItem[]>(queryKeys.notifications.inApp, (items = []) => (
+      items.map((item) => item.id === updated.id ? updated : item)
+    ))
+    queryClient.setQueryData<NotificationListResponse>(
+      queryKeys.notifications.history(historyRequest),
+      (current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.id === updated.id ? updated : item),
+      } : current,
+    )
   }
 
   const handleMarkRead = async (item: NotificationItem) => {
@@ -179,8 +157,7 @@ function NotificationsPage() {
       message.success(`已將 ${unreadItems.length} 則通知標記為已讀。`)
     } catch (error) {
       message.error(error instanceof Error ? error.message : '全部標記已讀失敗。')
-      await loadInApp()
-      await loadHistory()
+      await Promise.all([inAppQuery.refetch(), historyQuery.refetch()])
     } finally {
       setMarkingAll(false)
     }
@@ -201,7 +178,7 @@ function NotificationsPage() {
       setRetryTarget(null)
       retryForm.resetFields()
       message.success(updated.status === 'sent' ? '通知重送成功。' : '已完成重送，但發送結果仍為失敗。')
-      await loadHistory()
+      await historyQuery.refetch()
     } catch (error) {
       message.error(error instanceof Error ? error.message : '通知重送失敗。')
     } finally {
@@ -329,11 +306,11 @@ function NotificationsPage() {
               <Badge count={unreadItems.length} overflowCount={99} />
             </Space>
           )}
-          extra={<Button type="text" icon={<ReloadOutlined />} onClick={() => void loadInApp()}>重新整理</Button>}
+          extra={<Button type="text" icon={<ReloadOutlined />} onClick={() => void inAppQuery.refetch()}>重新整理</Button>}
         >
           {inAppLoading && inAppItems.length === 0 ? <LoadingState rows={5} /> : null}
           {inAppError && inAppItems.length === 0 ? (
-            <ErrorState title="無法載入站內通知" message={inAppError.message} onRetry={() => void loadInApp()} />
+            <ErrorState title="無法載入站內通知" message={inAppError.message} onRetry={() => void inAppQuery.refetch()} />
           ) : null}
           {!inAppLoading && !inAppError && inAppItems.length === 0 ? (
             <EmptyState description="目前沒有站內通知。" />
@@ -410,7 +387,7 @@ function NotificationsPage() {
           </div>
 
           {historyError && history.items.length === 0 ? (
-            <ErrorState title="無法載入發送紀錄" message={historyError.message} onRetry={() => void loadHistory()} />
+          <ErrorState title="無法載入發送紀錄" message={historyError.message} onRetry={() => void historyQuery.refetch()} />
           ) : historyLoading && history.items.length === 0 ? (
             <LoadingState rows={5} />
           ) : history.items.length === 0 ? (
