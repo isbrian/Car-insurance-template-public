@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Button, Card, Select, Table, Tag } from 'antd'
 import { FileSearchOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
@@ -8,6 +9,8 @@ import { ApiError } from '../../api/http'
 import ListPageShell from '../../components/shared/ListPageShell'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
+import { queryKeys } from '../../query/queryKeys'
 
 const statusLabels: Record<string, { text: string; color: string }> = {
   issued: { text: '已出單', color: 'processing' },
@@ -30,38 +33,17 @@ function formatMoney(value: number) {
 
 function PolicyListPage() {
   const navigate = useNavigate()
-  const [items, setItems] = useState<PolicyListItem[]>([])
-  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [keyword, setKeyword] = useState('')
-  const [debouncedKeyword, setDebouncedKeyword] = useState('')
   const [status, setStatus] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedKeyword(keyword), 300)
-    return () => window.clearTimeout(timer)
-  }, [keyword])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    void getPolicies(debouncedKeyword, status, page, 20, controller.signal)
-      .then((response) => {
-        setItems(response.items)
-        setTotal(response.total)
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取保單資料失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [debouncedKeyword, status, page, reloadKey])
+  const debouncedKeyword = useDebouncedValue(keyword, 300)
+  const policiesQuery = useQuery({
+    queryKey: queryKeys.policies.list(debouncedKeyword, status, page, 20),
+    queryFn: ({ signal }) => getPolicies(debouncedKeyword, status, page, 20, signal),
+    placeholderData: keepPreviousData,
+  })
+  const items: PolicyListItem[] = policiesQuery.data?.items ?? []
+  const total = policiesQuery.data?.total ?? 0
 
   const columns = [
     { title: '保單號碼', dataIndex: 'policyNumber', key: 'policyNumber', onCell: () => responsiveCell('保單號碼'), render: (value: string) => <strong>{value}</strong> },
@@ -73,12 +55,12 @@ function PolicyListPage() {
     { title: '操作', key: 'actions', onCell: () => responsiveCell('操作'), render: (_: unknown, item: PolicyListItem) => <Button type="link" icon={<FileSearchOutlined />} onClick={() => navigate(`/policies/${item.id}`)}>查看／文件</Button> },
   ]
 
-  if (error instanceof ApiError && error.status === 403) {
+  if (policiesQuery.error instanceof ApiError && policiesQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具保單資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (error) {
-    return <ErrorState title="保單資料讀取失敗" message={error.message} onRetry={() => setReloadKey((current) => current + 1)} />
+  if (policiesQuery.error) {
+    return <ErrorState title="保單資料讀取失敗" message={policiesQuery.error.message} onRetry={() => void policiesQuery.refetch()} />
   }
 
   return (
@@ -102,7 +84,7 @@ function PolicyListPage() {
       total={total}
       onPageChange={setPage}
     >
-      {loading && items.length === 0 ? (
+      {policiesQuery.isPending && items.length === 0 ? (
         <LoadingState />
       ) : items.length === 0 ? (
         <EmptyState description="目前沒有符合條件的保單資料" />
@@ -113,7 +95,7 @@ function PolicyListPage() {
             rowKey="id"
             columns={columns}
             dataSource={items}
-            loading={loading}
+            loading={policiesQuery.isFetching}
             pagination={false}
             scroll={{ x: 1000 }}
           />

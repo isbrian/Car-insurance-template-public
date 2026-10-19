@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Button, Card, Table, Tag, message } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
@@ -10,42 +11,39 @@ import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../comp
 import MaskedValue from '../../components/shared/MaskedValue'
 import { responsiveCell } from '../../components/shared/responsiveTable'
 import CustomerFormModal from './CustomerFormModal'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
+import { queryKeys } from '../../query/queryKeys'
 
 function CustomerListPage() {
   const navigate = useNavigate()
-  const [items, setItems] = useState<Customer[]>([])
-  const [total, setTotal] = useState(0)
+  const queryClient = useQueryClient()
   const [page, setPage] = useState(1)
   const [keyword, setKeyword] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [debouncedKeyword, setDebouncedKeyword] = useState('')
-  const [reloadKey, setReloadKey] = useState(0)
+  const debouncedKeyword = useDebouncedValue(keyword, 300)
+  const customersQuery = useQuery({
+    queryKey: queryKeys.customers.list(debouncedKeyword, page, 20),
+    queryFn: ({ signal }) => getCustomers(debouncedKeyword, page, 20, signal),
+    placeholderData: keepPreviousData,
+  })
+  const createMutation = useMutation({
+    mutationFn: createCustomer,
+    onSuccess: async () => {
+      message.success('客戶新增成功')
+      setModalOpen(false)
+      setPage(1)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.customers.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary }),
+      ])
+    },
+    onError: (requestError: Error) => {
+      message.error(requestError.message || '新增客戶失敗')
+    },
+  })
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedKeyword(keyword), 300)
-    return () => window.clearTimeout(timer)
-  }, [keyword])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    void getCustomers(debouncedKeyword, page, 20, controller.signal)
-      .then((response) => {
-        setItems(response.items)
-        setTotal(response.total)
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取客戶資料失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [debouncedKeyword, page, reloadKey])
+  const items: Customer[] = customersQuery.data?.items ?? []
+  const total = customersQuery.data?.total ?? 0
 
   const handleSearchChange = (value: string) => {
     setKeyword(value)
@@ -53,21 +51,7 @@ function CustomerListPage() {
   }
 
   const handleCreate = async (values: CustomerCreateRequest) => {
-    setSaving(true)
-    try {
-      await createCustomer(values)
-      message.success('客戶新增成功')
-      setModalOpen(false)
-      setPage(1)
-      const response = await getCustomers(debouncedKeyword, 1, 20)
-      setItems(response.items)
-      setTotal(response.total)
-    } catch (requestError: unknown) {
-      message.error(requestError instanceof Error ? requestError.message : '新增客戶失敗')
-      throw requestError
-    } finally {
-      setSaving(false)
-    }
+    await createMutation.mutateAsync(values)
   }
 
   const columns = [
@@ -87,12 +71,12 @@ function CustomerListPage() {
     { title: '操作', key: 'actions', onCell: () => responsiveCell('操作'), render: (_: unknown, customer: Customer) => <Button type="link" onClick={() => navigate(`/customers/${customer.id}`)}>檢視</Button> },
   ]
 
-  if (error instanceof ApiError && error.status === 403) {
+  if (customersQuery.error instanceof ApiError && customersQuery.error.status === 403) {
     return <ForbiddenState requiredRole="具客戶資料查看權限的角色" contact="系統管理員" />
   }
 
-  if (error) {
-    return <ErrorState title="客戶資料讀取失敗" message={error.message} onRetry={() => setReloadKey((current) => current + 1)} />
+  if (customersQuery.error) {
+    return <ErrorState title="客戶資料讀取失敗" message={customersQuery.error.message} onRetry={() => void customersQuery.refetch()} />
   }
 
   return (
@@ -107,7 +91,7 @@ function CustomerListPage() {
       total={total}
       onPageChange={setPage}
     >
-      {loading && items.length === 0 ? (
+      {customersQuery.isPending && items.length === 0 ? (
         <LoadingState />
       ) : items.length === 0 ? (
         <EmptyState
@@ -121,14 +105,14 @@ function CustomerListPage() {
             rowKey="id"
             columns={columns}
             dataSource={items}
-            loading={loading}
+            loading={customersQuery.isFetching}
             pagination={false}
             rowSelection={{}}
             scroll={{ x: 760 }}
           />
         </Card>
       )}
-      <CustomerFormModal open={modalOpen} confirmLoading={saving} onCancel={() => setModalOpen(false)} onSubmit={handleCreate} />
+      <CustomerFormModal open={modalOpen} confirmLoading={createMutation.isPending} onCancel={() => setModalOpen(false)} onSubmit={handleCreate} />
     </ListPageShell>
   )
 }

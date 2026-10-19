@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { ReloadOutlined } from '@ant-design/icons'
 import { Button, Card, Statistic } from 'antd'
 import { getDashboardSummary } from '../../api/dashboard'
 import { ApiError } from '../../api/http'
 import type { DashboardSummary } from '../../api/dashboard'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
+import { queryKeys } from '../../query/queryKeys'
 
 function isEmptySummary(summary: DashboardSummary): boolean {
   return summary.customerTotal === 0
@@ -14,32 +15,18 @@ function isEmptySummary(summary: DashboardSummary): boolean {
 }
 
 function DashboardPage() {
-  const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
+  const {
+    data: summary,
+    error,
+    isPending,
+    isFetching,
+    refetch,
+  } = useQuery({
+    queryKey: queryKeys.dashboard.summary,
+    queryFn: ({ signal }) => getDashboardSummary(signal),
+  })
 
-  const refresh = useCallback(() => {
-    setReloadKey((current) => current + 1)
-  }, [])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-
-    void getDashboardSummary(controller.signal)
-      .then(setSummary)
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('儀表板資料讀取失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [reloadKey])
-
-  if (loading && !summary) {
+  if (isPending && !summary) {
     return <LoadingState rows={5} />
   }
 
@@ -48,14 +35,14 @@ function DashboardPage() {
   }
 
   if (error) {
-    return <ErrorState title="儀表板資料讀取失敗" message={error.message} onRetry={refresh} />
+    return <ErrorState title="儀表板資料讀取失敗" message={error.message} onRetry={() => void refetch()} />
   }
 
   if (!summary || isEmptySummary(summary)) {
     return (
       <EmptyState
         description="目前沒有可顯示的儀表板統計資料"
-        action={<Button icon={<ReloadOutlined />} loading={loading} onClick={refresh}>重新整理</Button>}
+        action={<Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => void refetch()}>重新整理</Button>}
       />
     )
   }
@@ -63,7 +50,7 @@ function DashboardPage() {
   return (
     <section className="dashboard-page">
       <div className="dashboard-actions">
-        <Button icon={<ReloadOutlined />} loading={loading} onClick={refresh}>重新整理</Button>
+        <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => void refetch()}>重新整理</Button>
       </div>
       <div className="dashboard-grid">
         <Card>

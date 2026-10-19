@@ -3,7 +3,7 @@ WORKDIR /src
 COPY ["CarInsurance.Api.csproj", "./"]
 RUN dotnet restore "CarInsurance.Api.csproj"
 COPY . .
-RUN dotnet publish "CarInsurance.Api.csproj" -c Release -o /app/publish -r linux-x64 --self-contained false /p:UseAppHost=false
+RUN dotnet publish "CarInsurance.Api.csproj" -c Release -o /app/publish --self-contained false /p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app

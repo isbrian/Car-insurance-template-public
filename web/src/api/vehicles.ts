@@ -1,4 +1,4 @@
-import { authenticatedFetch } from './http'
+import { authenticatedFetch, toApiError } from './http'
 
 export type Vehicle = {
   id: number
@@ -28,25 +28,8 @@ export type VehicleCreateRequest = {
   customerId: number
 }
 
-type ProblemDetails = {
-  title?: string
-  detail?: string
-  errors?: Record<string, string[]>
-}
-
 async function readError(response: Response): Promise<Error> {
-  let problem: ProblemDetails | undefined
-  try {
-    problem = (await response.json()) as ProblemDetails
-  } catch {
-    // 非 JSON 回應使用 HTTP 狀態文字。
-  }
-
-  const validationMessage = problem?.errors
-    ? Object.values(problem.errors).flat().filter(Boolean).join('；')
-    : undefined
-  const message = problem?.detail || validationMessage || problem?.title || `請求失敗（${response.status}）`
-  return new Error(message)
+  return toApiError(response)
 }
 
 export async function getVehicles(

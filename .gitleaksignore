@@ -1,0 +1,3 @@
+# Demo-only JWT signing key used by the isolated API integration-test factory.
+3442ea331ae4d145b101dbee937fc21262c0978b:tests/CarInsurance.Api.Tests/Infrastructure/CarInsuranceApiFactory.cs:generic-api-key:31
+tests/CarInsurance.Api.Tests/Infrastructure/CarInsuranceApiFactory.cs:generic-api-key:31

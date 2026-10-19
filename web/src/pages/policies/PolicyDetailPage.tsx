@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { App, Button, Card, Descriptions, Space, Tag, Timeline, Typography } from 'antd'
 import { ArrowLeftOutlined, DownloadOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
 import { downloadPolicyDocument, getPolicy, getPolicyTimeline } from '../../api/policies'
-import type { PolicyDetails, PolicyTimeline } from '../../api/policies'
 import { ApiError } from '../../api/http'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
+import { queryKeys } from '../../query/queryKeys'
 
 const statusLabels: Record<string, { text: string; color: string }> = {
   issued: { text: '已出單', color: 'processing' },
@@ -48,45 +48,27 @@ function PolicyDetailPage() {
   const navigate = useNavigate()
   const { id } = useParams()
   const numericId = Number(id)
-  const [policy, setPolicy] = useState<PolicyDetails | null>(null)
-  const [timeline, setTimeline] = useState<PolicyTimeline | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-  const [downloading, setDownloading] = useState(false)
-  const [reloadKey, setReloadKey] = useState(0)
-
-  useEffect(() => {
-    if (!Number.isInteger(numericId) || numericId <= 0) {
-      setLoading(false)
-      setPolicy(null)
-      return
-    }
-
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    void Promise.all([
-      getPolicy(numericId, controller.signal),
-      getPolicyTimeline(numericId, controller.signal),
-    ])
-      .then(([policyResult, timelineResult]) => {
-        setPolicy(policyResult)
-        setTimeline(timelineResult)
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取保單詳情失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [numericId, reloadKey])
+  const isValidId = Number.isInteger(numericId) && numericId > 0
+  const policyQuery = useQuery({
+    queryKey: queryKeys.policies.detail(numericId),
+    queryFn: ({ signal }) => getPolicy(numericId, signal),
+    enabled: isValidId,
+  })
+  const timelineQuery = useQuery({
+    queryKey: queryKeys.policies.timeline(numericId),
+    queryFn: ({ signal }) => getPolicyTimeline(numericId, signal),
+    enabled: isValidId,
+  })
+  const downloadMutation = useMutation({ mutationFn: downloadPolicyDocument })
+  const policy = policyQuery.data ?? null
+  const timeline = timelineQuery.data ?? null
+  const error = policyQuery.error ?? timelineQuery.error
+  const loading = policyQuery.isPending || timelineQuery.isPending
 
   const handleDownload = async () => {
     if (!policy) return
-    setDownloading(true)
     try {
-      const { blob, fileName } = await downloadPolicyDocument(policy.id)
+      const { blob, fileName } = await downloadMutation.mutateAsync(policy.id)
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
@@ -98,8 +80,6 @@ function PolicyDetailPage() {
       message.success('保單 PDF 已開始下載')
     } catch (requestError: unknown) {
       message.error(requestError instanceof Error ? requestError.message : '保單 PDF 下載失敗')
-    } finally {
-      setDownloading(false)
     }
   }
 
@@ -118,7 +98,7 @@ function PolicyDetailPage() {
       <ErrorState
         title="保單詳情讀取失敗"
         message={error.message}
-        onRetry={() => setReloadKey((current) => current + 1)}
+        onRetry={() => { void policyQuery.refetch(); void timelineQuery.refetch() }}
         fallback={<Button onClick={() => navigate('/policies')}>返回保單列表</Button>}
       />
     )
@@ -136,7 +116,7 @@ function PolicyDetailPage() {
           <Typography.Title level={3} style={{ margin: 0 }}>{policy?.policyNumber || '保單詳情'}</Typography.Title>
           {policy ? <StatusTag status={policy.status} /> : null}
         </Space>
-        <Button type="primary" icon={<DownloadOutlined />} loading={downloading} disabled={!policy} onClick={handleDownload}>下載保單 PDF</Button>
+        <Button type="primary" icon={<DownloadOutlined />} loading={downloadMutation.isPending} disabled={!policy} onClick={handleDownload}>下載保單 PDF</Button>
       </Space>
 
       <Card loading={loading} title="保單基本資料">

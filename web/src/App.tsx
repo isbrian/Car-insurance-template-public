@@ -1,25 +1,27 @@
 import { App as AntApp, Alert, Button, Card, ConfigProvider, Result, Skeleton } from 'antd'
+import { lazy, Suspense } from 'react'
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import AppLayout from './components/AppLayout'
-import PlaceholderPage from './pages/PlaceholderPage'
-import CustomerListPage from './pages/customers/CustomerListPage'
-import CustomerDetailPage from './pages/customers/CustomerDetailPage'
-import VehicleListPage from './pages/vehicles/VehicleListPage'
-import VehicleDetailPage from './pages/vehicles/VehicleDetailPage'
-import QuotationPage from './pages/quotation/QuotationPage'
-import UnderwritingPage from './pages/underwriting/UnderwritingPage'
-import UnderwritingQueuePage from './pages/underwritingQueue/UnderwritingQueuePage'
-import PolicyListPage from './pages/policies/PolicyListPage'
-import PolicyDetailPage from './pages/policies/PolicyDetailPage'
-import PaymentIssuePage from './pages/payments/PaymentIssuePage'
-import ClaimsPage from './pages/claims/ClaimsPage'
-import DocumentsPage from './pages/documents/DocumentsPage'
-import NotificationsPage from './pages/notifications/NotificationsPage'
-import LoginPage from './pages/auth/LoginPage'
-import SettingsPage from './pages/settings/SettingsPage'
-import AuditLogPage from './pages/audit/AuditLogPage'
-import DashboardPage from './pages/dashboard/DashboardPage'
+
+const PlaceholderPage = lazy(() => import('./pages/PlaceholderPage'))
+const CustomerListPage = lazy(() => import('./pages/customers/CustomerListPage'))
+const CustomerDetailPage = lazy(() => import('./pages/customers/CustomerDetailPage'))
+const VehicleListPage = lazy(() => import('./pages/vehicles/VehicleListPage'))
+const VehicleDetailPage = lazy(() => import('./pages/vehicles/VehicleDetailPage'))
+const QuotationPage = lazy(() => import('./pages/quotation/QuotationPage'))
+const UnderwritingPage = lazy(() => import('./pages/underwriting/UnderwritingPage'))
+const UnderwritingQueuePage = lazy(() => import('./pages/underwritingQueue/UnderwritingQueuePage'))
+const PolicyListPage = lazy(() => import('./pages/policies/PolicyListPage'))
+const PolicyDetailPage = lazy(() => import('./pages/policies/PolicyDetailPage'))
+const PaymentIssuePage = lazy(() => import('./pages/payments/PaymentIssuePage'))
+const ClaimsPage = lazy(() => import('./pages/claims/ClaimsPage'))
+const DocumentsPage = lazy(() => import('./pages/documents/DocumentsPage'))
+const NotificationsPage = lazy(() => import('./pages/notifications/NotificationsPage'))
+const LoginPage = lazy(() => import('./pages/auth/LoginPage'))
+const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'))
+const AuditLogPage = lazy(() => import('./pages/audit/AuditLogPage'))
+const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'))
 
 const pageDefinitions: Record<string, { title: string; description: string }> = {
   customers: { title: '客戶管理', description: '管理投保人與客戶基本資料。' },
@@ -48,38 +50,40 @@ function RoutedContent() {
 
   return (
     <AppLayout selectedKey={selectedKey}>
-      <Routes>
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/customers/:id" element={<CustomerDetailPage />} />
-        <Route path="/vehicles/:id" element={<VehicleDetailPage />} />
-        <Route path="/quotation" element={<QuotationPage />} />
-        <Route path="/underwriting" element={<UnderwritingPage />} />
-        <Route path="/uwqueue" element={<UnderwritingQueuePage />} />
-        <Route path="/issue" element={<PaymentIssuePage />} />
-        <Route path="/documents" element={<DocumentsPage />} />
-        <Route path="/notifications" element={<NotificationsPage />} />
-        <Route path="/audit" element={<AuditLogPage />} />
-        <Route path="/policies/:id" element={<PolicyDetailPage />} />
-        {Object.entries(pageDefinitions).map(([path, definition]) => (
-          <Route
-            key={path}
-            path={`/${path}`}
-            element={path === 'customers'
-              ? <CustomerListPage />
-              : path === 'vehicles'
-                ? <VehicleListPage />
-                : path === 'policies'
-                  ? <PolicyListPage />
-                  : path === 'claims'
-                    ? <ClaimsPage />
-                    : path === 'settings'
-                      ? <SettingsPage />
-                      : <PlaceholderPage title={definition.title} description={definition.description} />}
-          />
-        ))}
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+      <Suspense fallback={<Skeleton active title paragraph={{ rows: 6 }} />}>
+        <Routes>
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/customers/:id" element={<CustomerDetailPage />} />
+          <Route path="/vehicles/:id" element={<VehicleDetailPage />} />
+          <Route path="/quotation" element={<QuotationPage />} />
+          <Route path="/underwriting" element={<UnderwritingPage />} />
+          <Route path="/uwqueue" element={<UnderwritingQueuePage />} />
+          <Route path="/issue" element={<PaymentIssuePage />} />
+          <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/notifications" element={<NotificationsPage />} />
+          <Route path="/audit" element={<AuditLogPage />} />
+          <Route path="/policies/:id" element={<PolicyDetailPage />} />
+          {Object.entries(pageDefinitions).map(([path, definition]) => (
+            <Route
+              key={path}
+              path={`/${path}`}
+              element={path === 'customers'
+                ? <CustomerListPage />
+                : path === 'vehicles'
+                  ? <VehicleListPage />
+                  : path === 'policies'
+                    ? <PolicyListPage />
+                    : path === 'claims'
+                      ? <ClaimsPage />
+                      : path === 'settings'
+                        ? <SettingsPage />
+                        : <PlaceholderPage title={definition.title} description={definition.description} />}
+            />
+          ))}
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Suspense>
     </AppLayout>
   )
 }
@@ -152,10 +156,12 @@ function App() {
     >
       <AntApp>
         <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<LoginRoute />} />
-            <Route path="*" element={<ProtectedApp />} />
-          </Routes>
+          <Suspense fallback={<AuthInitializationState />}>
+            <Routes>
+              <Route path="/login" element={<LoginRoute />} />
+              <Route path="*" element={<ProtectedApp />} />
+            </Routes>
+          </Suspense>
         </AuthProvider>
       </AntApp>
     </ConfigProvider>

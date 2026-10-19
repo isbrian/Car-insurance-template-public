@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Card, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ApiError } from '../../api/http'
 import { getPermissionMatrix } from '../../api/permissionMatrix'
 import type { PermissionMatrix } from '../../api/permissionMatrix'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
+import { queryKeys } from '../../query/queryKeys'
 
 type PermissionRow = {
   permission: string
@@ -12,26 +14,11 @@ type PermissionRow = {
 }
 
 function PermissionMatrixPage() {
-  const [matrix, setMatrix] = useState<PermissionMatrix | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-
-    void getPermissionMatrix(controller.signal)
-      .then(setMatrix)
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取權限矩陣失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [reloadKey])
+  const matrixQuery = useQuery({
+    queryKey: queryKeys.permissionMatrix.all,
+    queryFn: ({ signal }) => getPermissionMatrix(signal),
+  })
+  const matrix: PermissionMatrix | null = matrixQuery.data ?? null
 
   const rolePermissionSets = useMemo(() => {
     const result = new Map<string, Set<string>>()
@@ -70,16 +57,16 @@ function PermissionMatrixPage() {
     })),
   ], [matrix])
 
-  if (error instanceof ApiError && error.kind === 'forbidden') {
+  if (matrixQuery.error instanceof ApiError && matrixQuery.error.kind === 'forbidden') {
     return <ForbiddenState requiredRole="系統管理員" contact="系統管理員" />
   }
 
-  if (error) {
+  if (matrixQuery.error) {
     return (
       <ErrorState
         title="權限矩陣讀取失敗"
-        message={error.message}
-        onRetry={() => setReloadKey((current) => current + 1)}
+        message={matrixQuery.error.message}
+        onRetry={() => void matrixQuery.refetch()}
       />
     )
   }
@@ -93,7 +80,7 @@ function PermissionMatrixPage() {
         </Typography.Text>
       </Card>
 
-      {loading && !matrix ? (
+      {matrixQuery.isPending && !matrix ? (
         <LoadingState rows={6} />
       ) : !matrix || matrix.roles.length === 0 || matrix.permissions.length === 0 ? (
         <EmptyState description="尚無權限矩陣資料" />
@@ -103,7 +90,7 @@ function PermissionMatrixPage() {
             rowKey="permission"
             columns={columns}
             dataSource={rows}
-            loading={loading}
+            loading={matrixQuery.isFetching}
             pagination={false}
             scroll={{ x: 940 }}
           />

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Alert,
   App,
@@ -31,6 +32,7 @@ import type { UnderwritingQueueItem } from '../../api/underwritingQueue'
 import { ApiError } from '../../api/http'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import { responsiveCell } from '../../components/shared/responsiveTable'
+import { queryKeys } from '../../query/queryKeys'
 
 const frequencyOptions = [
   { value: 'annual', label: '年繳' },
@@ -84,29 +86,62 @@ function renderStatus(status: string, definitions: Record<string, { text: string
 function PaymentIssuePage() {
   const { message } = App.useApp()
   const navigate = useNavigate()
-  const [items, setItems] = useState<Payment[]>([])
-  const [approvedCases, setApprovedCases] = useState<UnderwritingQueueItem[]>([])
-  const [applications, setApplications] = useState<InsuranceApplication[]>([])
+  const queryClient = useQueryClient()
   const [createMethods, setCreateMethods] = useState<Record<number, 'credit_card' | 'atm' | 'convenience_store' | 'cash_counter'>>({})
   const [creatingPaymentId, setCreatingPaymentId] = useState<number | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [policy, setPolicy] = useState<PolicySummary | null>(null)
   const [keyword, setKeyword] = useState('')
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [issuing, setIssuing] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
   const [paymentFrequency, setPaymentFrequency] = useState<'annual' | 'semiannual' | 'quarterly'>('annual')
   const [paymentMethod, setPaymentMethod] = useState<'credit_card' | 'atm' | 'convenience_store' | 'cash_counter'>('credit_card')
   const [note, setNote] = useState('')
   const [referenceNumber, setReferenceNumber] = useState('')
 
+  const paymentsQuery = useQuery({
+    queryKey: queryKeys.payments.all,
+    queryFn: ({ signal }) => getPayments(signal),
+  })
+  const approvedQuery = useQuery({
+    queryKey: queryKeys.underwritingQueue.list('', 'approved', 1, 100),
+    queryFn: ({ signal }) => getUnderwritingQueue('', 'approved', 1, 100, signal),
+  })
+  const autoApprovedQuery = useQuery({
+    queryKey: queryKeys.underwritingQueue.list('', 'auto_approved', 1, 100),
+    queryFn: ({ signal }) => getUnderwritingQueue('', 'auto_approved', 1, 100, signal),
+  })
+  const applicationsQuery = useQuery({
+    queryKey: queryKeys.applications.all,
+    queryFn: ({ signal }) => getApplications(signal),
+  })
+  const items: Payment[] = paymentsQuery.data ?? []
+  const approvedCases: UnderwritingQueueItem[] = [
+    ...(approvedQuery.data?.items ?? []),
+    ...(autoApprovedQuery.data?.items ?? []),
+  ]
+  const applications: InsuranceApplication[] = applicationsQuery.data ?? []
+  const error = paymentsQuery.error ?? approvedQuery.error ?? autoApprovedQuery.error ?? applicationsQuery.error
+  const loading = paymentsQuery.isPending || approvedQuery.isPending
+    || autoApprovedQuery.isPending || applicationsQuery.isPending
+  const preferredSelectedId = items.find((item) => item.status === 'pending')?.id
+    ?? items.find((item) => item.status === 'paid')?.id
+    ?? items[0]?.id
+    ?? null
+  const effectiveSelectedId = selectedId && items.some((item) => item.id === selectedId)
+    ? selectedId
+    : preferredSelectedId
+
   const selected = useMemo(
-    () => items.find((item) => item.id === selectedId) ?? null,
-    [items, selectedId],
+    () => items.find((item) => item.id === effectiveSelectedId) ?? null,
+    [effectiveSelectedId, items],
   )
+  const policyQuery = useQuery({
+    queryKey: queryKeys.payments.policyByApplication(selected?.applicationId ?? 0),
+    queryFn: () => getPolicyByApplication(selected!.applicationId),
+    enabled: Boolean(selected),
+  })
+  const policy: PolicySummary | null = policyQuery.data ?? null
 
   const filteredItems = useMemo(() => {
     const value = keyword.trim().toLowerCase()
@@ -132,64 +167,24 @@ function PaymentIssuePage() {
   const actionableCount = items.filter((item) => item.status === 'pending' || item.status === 'paid').length + pendingPaymentCases.length
 
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    void Promise.all([
-      getPayments(controller.signal),
-      getUnderwritingQueue('', 'approved', 1, 100, controller.signal),
-      getUnderwritingQueue('', 'auto_approved', 1, 100, controller.signal),
-      getApplications(controller.signal),
-    ])
-      .then(([payments, approved, autoApproved, applicationItems]) => {
-        setItems(payments)
-        setApprovedCases([...approved.items, ...autoApproved.items])
-        setApplications(applicationItems)
-        setSelectedId((current) => {
-          if (current && payments.some((item) => item.id === current)) return current
-          return payments.find((item) => item.status === 'pending')?.id
-            ?? payments.find((item) => item.status === 'paid')?.id
-            ?? payments[0]?.id
-            ?? null
-        })
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取付款資料失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [reloadKey])
-
-  useEffect(() => {
-    if (!selected) {
-      setPolicy(null)
-      return
-    }
+    if (!selected) return
 
     setPaymentFrequency(selected.paymentFrequency as typeof paymentFrequency)
     setPaymentMethod(selected.paymentMethod as typeof paymentMethod)
     setNote(selected.note ?? '')
     setReferenceNumber(selected.referenceNumber ?? '')
-    setPolicy(null)
+  }, [selected])
 
-    let cancelled = false
-    void getPolicyByApplication(selected.applicationId)
-      .then((result) => {
-        if (!cancelled && result) setPolicy(result)
-      })
-      .catch((requestError: unknown) => {
-        if (!cancelled) {
-          void message.error(requestError instanceof Error ? requestError.message : '查詢保單失敗')
-        }
-      })
-
-    return () => { cancelled = true }
-  }, [selected, message])
+  useEffect(() => {
+    if (policyQuery.error) {
+      void message.error(policyQuery.error.message || '查詢保單失敗')
+    }
+  }, [message, policyQuery.error])
 
   function replacePayment(updated: Payment) {
-    setItems((current) => current.map((item) => item.id === updated.id ? updated : item))
+    queryClient.setQueryData<Payment[]>(queryKeys.payments.all, (current = []) => (
+      current.map((item) => item.id === updated.id ? updated : item)
+    ))
   }
 
   async function handleCreatePayment(item: UnderwritingQueueItem) {
@@ -207,8 +202,7 @@ function PaymentIssuePage() {
         paymentFrequency: frequency,
         paymentMethod: createMethods[item.applicationId] ?? 'credit_card',
       })
-      setItems((current) => [created, ...current])
-      setApprovedCases((current) => current.filter((row) => row.applicationId !== item.applicationId))
+      queryClient.setQueryData<Payment[]>(queryKeys.payments.all, (current = []) => [created, ...current])
       setSelectedId(created.id)
       void message.success(`已產生繳費單 ${created.paymentNumber}`)
     } catch (requestError) {
@@ -240,7 +234,8 @@ function PaymentIssuePage() {
     setIssuing(true)
     try {
       const result = await issuePolicy(target.applicationId)
-      setPolicy(result)
+      queryClient.setQueryData(queryKeys.payments.policyByApplication(target.applicationId), result)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.policies.all })
       void message.success(`已建立正式保單 ${result.policyNumber}`)
       return result
     } catch (requestError) {
@@ -306,7 +301,12 @@ function PaymentIssuePage() {
   }
 
   if (error) {
-    return <ErrorState title="付款資料讀取失敗" message={error.message} onRetry={() => setReloadKey((value) => value + 1)} />
+    return <ErrorState title="付款資料讀取失敗" message={error.message} onRetry={() => {
+      void paymentsQuery.refetch()
+      void approvedQuery.refetch()
+      void autoApprovedQuery.refetch()
+      void applicationsQuery.refetch()
+    }} />
   }
 
   if (loading && items.length === 0) return <LoadingState rows={8} />
@@ -322,7 +322,12 @@ function PaymentIssuePage() {
           <Space>
             <Tag color="warning">待繳費 {pendingCount} 件</Tag>
             <Tag color="processing">可處理 {actionableCount} 件</Tag>
-            <Button icon={<ReloadOutlined />} onClick={() => setReloadKey((value) => value + 1)}>重新整理</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => {
+              void paymentsQuery.refetch()
+              void approvedQuery.refetch()
+              void autoApprovedQuery.refetch()
+              void applicationsQuery.refetch()
+            }}>重新整理</Button>
           </Space>
         </Space>
       </Card>

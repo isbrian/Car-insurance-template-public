@@ -79,7 +79,10 @@ test.describe('T-051B 報價 → 投保送出 E2E', () => {
     await expect(page.getByText('試算結果')).toBeVisible()
 
     await page.getByRole('button', { name: '建立報價草稿' }).click()
-    await expect(page.locator('.ant-result-title').filter({ hasText: /報價草稿 .* 已建立/ })).toBeVisible()
+    const createdQuoteTitle = page.locator('.ant-result-title').filter({ hasText: /報價草稿 .* 已建立/ })
+    await expect(createdQuoteTitle).toBeVisible()
+    const quoteNumber = (await createdQuoteTitle.textContent())?.match(/報價草稿 (\S+) 已建立/)?.[1]
+    if (!quoteNumber) throw new Error('無法從建立成功訊息取得報價編號')
     await page.getByRole('button', { name: '啟用並前往投保' }).click()
 
     await expect(page).toHaveURL(/\/underwriting$/)
@@ -89,7 +92,7 @@ test.describe('T-051B 報價 → 投保送出 E2E', () => {
     await quoteSelect.click()
     await page
       .locator('.ant-select-dropdown:visible .ant-select-item-option-content')
-      .filter({ hasText: /王小明.*ABC-1234/ })
+      .filter({ hasText: quoteNumber })
       .click()
     await page.getByRole('button', { name: '建立申請' }).click()
 

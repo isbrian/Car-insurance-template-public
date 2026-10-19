@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Button, Card, Input, Select, Space, Table, Tabs, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ApiError } from '../../api/http'
@@ -7,6 +8,7 @@ import type { AuditLog, AuditLogQuery } from '../../api/auditLogs'
 import ListPageShell from '../../components/shared/ListPageShell'
 import { EmptyState, ErrorState, ForbiddenState, LoadingState } from '../../components/shared/DataState'
 import AuditLogDetailDrawer from './AuditLogDetailDrawer'
+import { queryKeys } from '../../query/queryKeys'
 
 const PAGE_SIZE = 20
 const ROLE_OPTIONS = ['業務員', '核保員', '理賠員', '主管', '系統管理員'].map((value) => ({ value, label: value }))
@@ -70,47 +72,30 @@ function formatOccurredAt(value: string): string {
 }
 
 function AuditLogPage() {
-  const [items, setItems] = useState<AuditLog[]>([])
-  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
   const [draft, setDraft] = useState<FilterDraft>(emptyFilters)
   const [applied, setApplied] = useState<FilterDraft>(emptyFilters)
   const [activeCategory, setActiveCategory] = useState<AuditCategoryKey>('all')
   const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLog | null>(null)
 
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-
-    const query: AuditLogQuery = {
-      page,
-      pageSize: PAGE_SIZE,
-      actor: applied.actor,
-      role: applied.role,
-      action: applied.action,
-      objectType: activeCategory === 'all' ? applied.objectType : activeCategory,
-      objectId: applied.objectId,
-      fromUtc: toUtcIso(applied.fromLocal),
-      toUtc: toUtcIso(applied.toLocal),
-    }
-
-    void getAuditLogs(query, controller.signal)
-      .then((response) => {
-        setItems(response.items)
-        setTotal(response.total)
-      })
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === 'AbortError') return
-        setError(requestError instanceof Error ? requestError : new Error('讀取稽核軌跡失敗'))
-      })
-      .finally(() => setLoading(false))
-
-    return () => controller.abort()
-  }, [activeCategory, applied, page, reloadKey])
+  const auditQuery: AuditLogQuery = {
+    page,
+    pageSize: PAGE_SIZE,
+    actor: applied.actor,
+    role: applied.role,
+    action: applied.action,
+    objectType: activeCategory === 'all' ? applied.objectType : activeCategory,
+    objectId: applied.objectId,
+    fromUtc: toUtcIso(applied.fromLocal),
+    toUtc: toUtcIso(applied.toLocal),
+  }
+  const auditLogsQuery = useQuery({
+    queryKey: queryKeys.auditLogs.list(auditQuery),
+    queryFn: ({ signal }) => getAuditLogs(auditQuery, signal),
+    placeholderData: keepPreviousData,
+  })
+  const items: AuditLog[] = auditLogsQuery.data?.items ?? []
+  const total = auditLogsQuery.data?.total ?? 0
 
   const applyFilters = () => {
     setPage(1)
@@ -184,16 +169,16 @@ function AuditLogPage() {
     },
   ]
 
-  if (error instanceof ApiError && error.kind === 'forbidden') {
+  if (auditLogsQuery.error instanceof ApiError && auditLogsQuery.error.kind === 'forbidden') {
     return <ForbiddenState requiredRole="主管或系統管理員" contact="系統管理員" />
   }
 
-  if (error) {
+  if (auditLogsQuery.error) {
     return (
       <ErrorState
         title="稽核軌跡讀取失敗"
-        message={error.message}
-        onRetry={() => setReloadKey((current) => current + 1)}
+        message={auditLogsQuery.error.message}
+        onRetry={() => void auditLogsQuery.refetch()}
       />
     )
   }
@@ -266,7 +251,7 @@ function AuditLogPage() {
         total={total}
         onPageChange={setPage}
       >
-        {loading && items.length === 0 ? (
+        {auditLogsQuery.isPending && items.length === 0 ? (
           <LoadingState rows={6} />
         ) : items.length === 0 ? (
           <EmptyState description="目前查詢條件下沒有稽核紀錄" />
@@ -276,7 +261,7 @@ function AuditLogPage() {
               rowKey="id"
               columns={columns}
               dataSource={items}
-              loading={loading}
+              loading={auditLogsQuery.isFetching}
               pagination={false}
               scroll={{ x: 1180 }}
             />
