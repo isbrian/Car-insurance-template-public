@@ -4,6 +4,8 @@
 
 > ⚠️ 本專案僅供作品展示、學習與測試。Seed Data、登入資料與費率皆為 Demo 用途，不得用於真實保險業務。
 
+目前版本：[V0.1.1.0](https://github.com/isbrian/Car-insurance-template-public/releases/tag/0.1.1.0)
+
 ## 畫面預覽
 
 ### 儀表板
@@ -33,7 +35,7 @@
 
 ## 技術架構
 
-- **Frontend**：React 19、TypeScript、Ant Design 5、Vite
+- **Frontend**：React 19、TypeScript、Ant Design 5、TanStack Query 5、Vite
 - **Backend**：ASP.NET Core Web API（.NET 10）、EF Core
 - **Database**：SQLite
 - **Web / Proxy**：Nginx
@@ -43,7 +45,8 @@
 ```mermaid
 flowchart LR
     U[Browser] --> W[React + Ant Design]
-    W --> N[Nginx]
+    W --> Q[TanStack Query Cache]
+    Q --> N[Nginx]
     N -->|/api| A[ASP.NET Core Web API]
     A --> E[EF Core]
     E --> D[(SQLite)]
@@ -51,6 +54,20 @@ flowchart LR
 ```
 
 瀏覽器只需連到 Web；Nginx 將 `/api/` reverse proxy 到 Compose network 內的 API，因此一般 Demo 不需要另外暴露 API host port。
+
+前端以 TanStack Query 管理 server state、cache invalidation 與重新整理流程，並使用 route-level lazy loading 與 vendor chunk splitting 降低初始載入成本。
+
+## V0.1.1.0 更新重點
+
+- 導入 TanStack Query，取代主要頁面的手動遠端資料載入與 reload counter。
+- 統一 Query keys、API error handling，以及登出／`401 Unauthorized` 時的 cache 清理。
+- 導入 route-level lazy loading，拆分 React、TanStack Query 與 rc-components vendor chunks。
+- production build 最大 chunk 由約 850 kB 降至 359.90 kB，不再出現 Vite 500 kB chunk 警告。
+- 更新高風險相依套件；`npm audit` 為 0 vulnerabilities。
+- 改善 Docker 跨架構相容性與 Playwright E2E selector 穩定性。
+- 移除 repository 內的 runtime SQLite database；啟動時由 migration 與 Seed Data 建立 Demo 資料。
+
+完整異動請見 [V0.1.1.0 Release Notes](https://github.com/isbrian/Car-insurance-template-public/releases/tag/0.1.1.0)。
 
 ## 快速開始
 
@@ -132,11 +149,20 @@ npm --prefix web run e2e:docker
 
 E2E runner 使用獨立的 `docker-compose.e2e.yml` 與 SQLite volume，在 Playwright 官方 image 執行測試，結束後清除隔離環境，不會覆寫一般 Demo 資料。
 
+V0.1.1.0 發布驗證結果：
+
+- API integration tests：163/163 通過
+- Playwright Docker E2E：18/18 通過
+- ESLint、TypeScript typecheck、Vite production build：通過
+- npm audit：0 vulnerabilities
+- Gitleaks Git history／filesystem：無未處理洩漏
+
 ## 專案結構
 
 | 路徑 | 說明 |
 |---|---|
 | `web/` | React + TypeScript 前端與 Playwright E2E |
+| `web/src/query/` | TanStack Query client 與集中式 query keys |
 | `api/` | ASP.NET Core Web API、EF Core、Seed Data 與暫定費率資料 |
 | `tests/CarInsurance.Api.Tests/` | API integration tests |
 | `screenshots/` | GitHub README 使用的實際 Demo 畫面 |
