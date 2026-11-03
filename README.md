@@ -35,6 +35,8 @@
 
 ## 技術架構
 
+本專案採用 **Monorepo**，在同一個 Git repository 中管理前端、API、API 整合測試與 Docker Compose 部署設定；各部分仍使用各自的技術工具與建置流程。
+
 - **Frontend**：React 19、TypeScript、Ant Design 5、TanStack Query 5、Vite
 - **Backend**：ASP.NET Core Web API（.NET 10）、EF Core
 - **Database**：SQLite
