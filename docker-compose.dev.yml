@@ -1,0 +1,23 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      DOTNET_USE_POLLING_FILE_WATCHER: "1"
+      DocumentStorage__Root: /data/uploads
+      Jwt__SigningKey: demo-only-carinsurance-signing-key-change-before-production-2026
+      Auth__MfaCode: "123456"
+      Auth__DemoPassword: Demo123!
+    volumes:
+      - ./api:/src
+      - carinsurance-data:/data
+      - api-dev-obj:/src/obj
+      - api-dev-bin:/src/bin
+    command: dotnet watch run --project CarInsurance.Api.csproj --urls http://+:8080
+
+volumes:
+  api-dev-obj:
+  api-dev-bin:
